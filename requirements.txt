@@ -1,6 +1,0 @@
-typer
-rich
-httpx
-platformdirs
-pydantic
-rsa

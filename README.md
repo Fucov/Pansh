@@ -1,175 +1,108 @@
-# BHPAN CLI 现代化重构版
+# AnyShare (PanCLI) 交互式 Shell
 
-本项目提供了上传、下载、管理北航网盘文件的精美现代化命令行工具。
-基于 Typer + Rich + httpx + Pydantic 构筑，适合在无 GUI 的服务器上高效使用。
+本项目是一个专为 **AnyShare 7 架构网盘**（如北航网盘）提取并高度定制的现代化、**沉浸式 REPL 命令行系统**。
+它抛弃了传统 CLI 的离散调用方式，采用 `prompt_toolkit` 构建了一个带有**状态保持（当前工作目录 CWD）**的交互终端，让你在云盘中穿梭能够如本地文件系统一般自然。
 
-> 核心 API 参考自：[Anyshare OpenDoc](https://developers.aishutech.com/openDoc/product/2/version/3/doc/15)
+## ✨ 核心亮点
 
-## 特性亮点
-
-- **精美终端 UI**：使用 Rich 渲染带颜色的目录表格、文件结构树和超高颜值的上传/下载进度条。
-- **现代化架构**：
-  - **网络层**：使用 `httpx` 连接池复用，支持流式并发网络 IO，内置 SSL 证书补丁与智能重试机制。
-  - **参数解析**：使用 `Typer` 提供开箱即用的 `--help` 与完美输入校验。
-  - **数据验证**：使用 `Pydantic` 将散乱字典收敛为前置校验强类型对象。
-- **安全与标准**：使用 `platformdirs` 将密码与缓存合规安放于操作系统的 `user_config_dir`，告别硬编码。
-- **打包友好**：无缝支持 PyInstaller，无冗余 C 扩展，极简打包为单执行文件。
+- **沉浸式交互层 (REPL)**：输入 `pancli` 进入独立网盘环境，拥有类似 Bash 的光标、历史记录和连续操作体验。
+- **全系 Unix 命令挂载**：支持 `cd`, `pwd`, `ls`, `tree`, `rm`, `mv`, `cp`, `mkdir`, `cat`, `touch`, `head`, `tail`, `stat` 等经典范式，无需反复输入长长的远程路径。
+- **泛 AnyShare 兼容**：将配置彻底剥离硬编码。通过修改底层 `config.json`，可随时连接至全国任意的高校/政企 AnyShare 分发中心。
+- **极速工程化管理**：基于 `uv` 包管理器全面接管环境，通过 `pyproject.toml` 标准分发。
+- **孤岛打包策略**：完美融入 `PyInstaller`，无需 Python 运行环境也能在隔离服务器上一线到底。
 
 ---
 
-## 安装说明
+## 🛠 安装与快速启动
 
-### 环境要求
+### 前置要求
 - Python 3.10+
+- 推荐使用 [uv](https://github.com/astral-sh/uv) 管理器
 
-### 安装步骤
+### 开发级安装
 
-1. 克隆代码或下载源码到本地：
+**方式一：使用 uv（推荐）**
 ```bash
-cd /Users/ykw/Code/Pycharm/PanCLI
+# 1. 克隆源仓库
+cd PanCLI
+
+# 2. 从本地安装到你的系统预置路径（通过 uv 极速秒装）
+uv pip install -e .
+
+# 3. 敲击命令，进入奇景！
+pancli
+# 亦可使用 bhpan 别名启动
 ```
 
-2. 安装依赖并注册为系统全局命令行工具（推荐）：
+**方式二：使用标准 Python (venv + pip)**
 ```bash
+# 1. 克隆源仓库并进入目录
+cd PanCLI
+
+# 2. 创建并激活虚拟环境
+python3 -m venv .venv
+source .venv/bin/activate  # Windows 下使用: .venv\Scripts\activate
+
+# 3. 安装依赖并注册全局命令
 pip install -e .
-```
-> 安装完成后，你可以在系统的任何位置直接使用 `bhpan` 命令。
 
-### 第一次运行授权说明
-1. 第一次运行任意命令（如 `bhpan ls home`）时，会提示你在终端里输入`Username:` 与 `Password:`。
-2. **凭据存储**：程序将使用北航网盘官方提供的公钥以 RSA 加密你的密码，并存储在当前系统的标准用户数据配置目录下：
-   - Windows: `%APPDATA%/bhpan/config.json`
-   - macOS: `~/Library/Application Support/bhpan/config.json`
-   - Linux: `~/.config/bhpan/config.json`
-3. 如果你不希望在磁盘存储凭据（每次手动输入），你可以找到上述的 `config.json` 文件，并将其中的 `"store_password": true` 改为 `false`。
+# 4. 启动交互式系统
+pancli
+```
+> **💡 提示：** 如果你在方式二下遇到类似 `zsh: command not found: pancli` 的报错，通常是因为当前终端窗口没有激活对应的虚拟环境。请确保你在执行前已经跑过 `source .venv/bin/activate`。
+
+### PyInstaller 单体应用免驱打包
+
+对于仅有 SSH 的隔离服务器，我们可以在带有运行时的本机构建独立二进制包并直接丢过去：
+```bash
+uv pip install pyinstaller
+pyinstaller --onefile --name pancli pancli/main.py
+```
+打包后将其产生在 `dist/pancli`，赋予 `chmod +x` 后即可在全网服务器肆意拷贝。
 
 ---
 
-## 命令指南
+## 💻 沉浸式指令指南
 
-### 列出目录内容 (`ls`)
-列出远程文件夹，支持可读文件大小格式。
-```bash
-bhpan ls [远程文件/文件夹]
+当你在终端敲下 `pancli`，经历交互式密码鉴权后，你将步入：
 
-# 例：列出网盘文档根目录，并以人类可读（K/M/G）显示文件大小
-bhpan ls home -h
+```text
+PanCLI [/文档库/你的姓名] $ _
 ```
+这意味着你已处在当前沙河环境中。
 
-### 上传文件 (`upload`)
-将本地文件或目录上传到云端。
-```bash
-bhpan upload [本地文件/文件夹] [远程目标系统文件夹]
+### 基础文件系统导航
+- `pwd` - 我在哪？打印当下云盘内的绝对路径。
+- `cd <dir>` - 在目录间穿梭，支持 `/` 的绝对路径与基于当前节点的相对路径。
+- `ls [dir] [-h]` - 枚举当前或指定路径的一级文件。`-h` 以 K/M/G 显示超凡的 Rich 网格。
+- `tree [dir]` - 穿透打印整棵目录树。
 
-# 递归上传整个目录
-bhpan upload docs/ home/my_docs -r
+### 增删与改名
+- `mkdir <dir>` - 递归创造长达千里的多级空目录。
+- `touch <file>` - 抚摸出一个空白的文件碎片。
+- `rm <path> [-r]` - 抹除指定目标。目录前请挂载 `-r`。
+- `mv <src> <dst> [-f]` - 迁移与更名。
+- `cp <src> <dst> [-f]` - 无情复制。
 
-# 上传并重命名
-bhpan upload video.mp4 home/ --rename new_video.mp4
-```
+### 信息窥探
+- `cat <file>` - 将目标文件推入你的当前 `stdout` 终端界面。
+- `head <file>` / `tail <file>` - 读取头与尾的片段。
+- `stat <path>` - 透视包含 `docid`、版本序列在内的 AnyShare 高级数据信息。
 
-### 下载文件 (`download`)
-将云端文件或目录下载到本地计算机。
-```bash
-bhpan download [远程文件/文件夹] [本地目标目录]
+### 本机互传
+- `upload <local_path> [remote_dir] [-r]`
+  将本地文件推入云端。超大文件自动激活极尽美学的并发进度条。
+- `download <remote_path> [local_dir] [-r]`
+  将云端的数据拖至本地。
 
-# 递归下载云端的整个目录
-bhpan download home/my_docs /tmp/local_docs -r
-```
-
-### 删除文件 / 目录 (`rm`)
-```bash
-bhpan rm [远程文件/文件夹]
-
-# 删除整个目录及内容
-bhpan rm home/useless_folder -r
-```
-
-### 查看并读取文件内容 (`cat`)
-将远程远端文件内容直接吐出到 `stdout`，非常适合配合 `grep`, `tail` 等 Linux 下游管道命令一同处理。
-```bash
-bhpan cat home/app.log | tail -n 50
-```
-
-### 移动与重命名 (`mv` / `cp`)
-文件系统内操作机制与标准 Linux 无缝对齐。
-```bash
-# 重命名
-bhpan mv home/test.png home/test2.png
-
-# 移动到存在的目录
-bhpan mv home/dir1/test.png home/dir2/dir3
-
-# 移动并重命名
-bhpan mv home/dir1/test.png home/dir2/dir3/test2.png
-
-# 使用 -f 强制覆盖目标位置已存在的文件
-bhpan mv home/test.png home/foo.png -f
-
-# 复制文件 (cp)
-bhpan cp home/test.png home/test2.png
-```
-
-### 创建目录 (`mkdir`)
-一次性递归创建多级目录，路径不存在的部分自动补齐。
-```bash
-bhpan mkdir home/test/1/2/3
-```
+### 退出与整洁
+- `clear` - 净化当前屏幕。
+- `exit` / `quit` - 告别 AnyShare，返回你冰冷的本机终端。
 
 ---
 
-## 外链与分享 (`link`)
+## ⚙️ 进阶：如何漫游至其他 AnyShare 阵地
 
-北航网盘支持为指定文件动态生成分享拉取外链，提供类似百度网盘的提取码分享功能。
+系统会在你的机器中寻找配置基地（依据操作系统的原生规范），比如 `~/.config/bhpan/config.json` 或 `~/Library/Application Support/bhpan/config.json`。
 
-### 查看文件的外链信息
-如果当前文件已有启用的对外链接，此命令将显示 URL 与提取码。
-```bash
-bhpan link show [远程文件/文件夹]
-```
-
-### 创建分享链接
-若文件尚无分享链接，使用此命令创建；若已有链接，此命令将以最新参数**覆盖修改**其外链权限。
-```bash
-# 常见用法：
-bhpan link create home/share.zip
-
-# 参数详解：
-# -p, --password      生成带提取码保护的私密分享（默认公开）
-# --allow-upload      生成的文件收集黑洞链接（允许任意陌生人向该链接上传文件）
-# --no-download       生成禁止下载与预览的链接
-# -e, --expires <天数> 指定链接在多少天后失效（默认 30 天）
-
-# 高级组合示例：加密收集信箱，7天后失效，不准对方下载
-bhpan link create home/InboxFolder -p -e 7 --allow-upload --no-download
-```
-
-### 取消分享链接
-强制终止对某文件的公共访问权限。
-```bash
-bhpan link delete home/share.zip
-```
-
----
-
-## 开发者文档
-
-### 架构一览
-```
-pancli/
-├── __init__.py    # 版本号
-├── models.py      # Pydantic 数据模型层（FileMetaData/ResourceInfo/LinkInfo）
-├── config.py      # platformdirs 配置管理持久层
-├── network.py     # httpx 封装内核（自动处理重定向追问、Session 降级与证书验证）
-├── auth.py        # OAuth2 授权处理引擎与 RSA 哈希换算环
-├── api.py         # ApiManager：抽象出网盘云端底层的所有 RESTful 函数映射
-└── main.py        # 顶层交互枢纽（Typer 路由映射及 Rich 组件驱动）
-```
-
-### PyInstaller 单体应用打包
-如果你希望把它部署给不想装 Python 运行时的普通同事，可以在克隆代码库后执行打包：
-```bash
-pip install pyinstaller
-pyinstaller --onefile --name bhpan run.py
-```
-这将在 `dist/` 文件夹下方产出一个跨终端的 `bhpan` 单文件二进制包。
+用文本编辑器打开它，你只需将其中的 `host` 替换为新的目标，并按需替换 `pubkey` 字段，你将获得一个管理任何 AnyShare 的私人利器。
