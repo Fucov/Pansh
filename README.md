@@ -106,3 +106,12 @@ PanCLI [/文档库/你的姓名] $ _
 系统会在你的机器中寻找配置基地（依据操作系统的原生规范），比如 `~/.config/bhpan/config.json` 或 `~/Library/Application Support/bhpan/config.json`。
 
 用文本编辑器打开它，你只需将其中的 `host` 替换为新的目标，并按需替换 `pubkey` 字段，你将获得一个管理任何 AnyShare 的私人利器。
+
+---
+
+## 📚 鸣谢与参考资料
+
+本项目的发展经历了彻底的重构与现代化演进，在此特别鸣谢和声明以下前置开源项目与参考资料：
+
+- **基座灵感**：本项目的初始非 REPL 终端代码逻辑分叉自并参考了开源项目 [xdedss/dist_bhpan](https://github.com/xdedss/dist_bhpan) (现已年久失修)。我们在其基础上进行了几乎彻底的底层重写，修复了诸如 CSRF 鉴权拦截、Boolean 类型序列化错误等多处核心 Bug，抛弃了老式的 argparse 单次命令调度模式，并全面演进至本仓库呈现的**状态保持交互式 REPL 生态**。
+- **协议文档**：项目中新增与重构的各项网络传输层通讯代码，皆参照官方 AnyShare RESTful 开放文档进行严格校审与精编：[AnyShare 开放文档](https://developers.aishutech.com/openDoc?productId=1&versonId=30&docId=338)。

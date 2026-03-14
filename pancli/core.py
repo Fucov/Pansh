@@ -14,7 +14,7 @@ from rich.progress import (
 from .api import ApiManager
 
 console = Console()
-__version__ = "3.0.0"
+__version__ = "0.1"
 
 def _sizeof_fmt(num: float, suffix: str = "") -> str:
     for unit in ("", "K", "M", "G", "T", "P", "E", "Z"):

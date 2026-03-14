@@ -143,15 +143,45 @@ class PanShell:
             ("head/tail <file>", "截取内容"), ("touch <file>", "空文件"),
             ("stat <path>", "元数据"), ("mkdir <dir>", "建目录"), ("rm <path> [-r]", "删除"),
             ("mv/cp <src> <dst>", "移动/复制"), ("upload/download <args>", "上传/下载"),
+            ("whoami", "查看当前登录账号状态"), ("logout", "清除本地凭据并退出"),
+            ("su [username]", "切换账号"),
             ("clear", "清屏"), ("exit/quit", "退出")
         ]
-        for c, d in cmds: table.add_row(c, d)
+        for c, d in cmds:
+            table.add_row(c, d)
         console.print(Panel(table, title="[bold]可用命令[/bold]", border_style="cyan"))
 
     def cmd_exit(self, args: list[str]) -> None: raise EOFError
     def cmd_quit(self, args: list[str]) -> None: raise EOFError
     def cmd_clear(self, args: list[str]) -> None: console.clear()
     def cmd_pwd(self, args: list[str]) -> None: console.print(self.cwd)
+
+    def cmd_whoami(self, args: list[str]) -> None:
+        console.print(f"当前用户: [bold cyan]{self.cfg.username}[/bold cyan]")
+        console.print(f"网盘 Host: [bold cyan]{self.cfg.host}[/bold cyan]")
+        if self.cfg.encrypted:
+            console.print("凭据状态: [green]已在本地保存密码[/green]")
+        else:
+            console.print("凭据状态: [yellow]未在本地保存密码[/yellow]")
+
+    def cmd_logout(self, args: list[str]) -> None:
+        self.cfg.username = None
+        self.cfg.encrypted = None
+        self.cfg.cached_token.token = ""
+        save_config(self.cfg)
+        console.print("[green]✓ 已清除本地凭据。将在下次命令或重启时生效。退出当前 Shell...[/green]")
+        raise EOFError
+
+    def cmd_su(self, args: list[str]) -> None:
+        """切换账号：清除信息 -> 关闭当前实例 -> 重新登录"""
+        self.cfg.username = args[0] if args else None
+        self.cfg.encrypted = None
+        self.cfg.cached_token.token = ""
+        save_config(self.cfg)
+        console.print(f"[cyan]准备切换账号，按要求重新登录...[/cyan]")
+        if self.manager:
+            self.manager.close()
+        self.login()
 
     def cmd_cd(self, args: list[str]) -> None:
         target = self.abs_path(args[0]) if args else f"/{self.home_name}"
