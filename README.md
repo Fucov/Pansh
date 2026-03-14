@@ -51,25 +51,15 @@ pancli
 ```
 > **💡 提示：** 如果你在方式二下遇到类似 `zsh: command not found: pancli` 的报错，通常是因为当前终端窗口没有激活对应的虚拟环境。请确保你在执行前已经跑过 `source .venv/bin/activate`。
 
-### PyInstaller 单体应用免驱打包
-
-对于仅有 SSH 的隔离服务器，我们可以在带有运行时的本机构建独立二进制包并直接丢过去：
+### 关于应用更新 (Git Pull)
+如果你使用了上面推荐的 `uv pip install -e .` 或 `pip install -e .`（**带有 `-e` 可编辑模式参数**），那么下次从 Github 或远程仓库拉取更新时，**无需重新拉取安装**：
 ```bash
-uv pip install pyinstaller
-pyinstaller --onefile --name pancli pancli/main.py
+git pull origin main
+# 拉取后代码会立刻生效，直接执行 pancli 即可使用最新功能！
 ```
-打包后将其产生在 `dist/pancli`，赋予 `chmod +x` 后即可在全网服务器肆意拷贝。
+*(仅当项目引入了全新的外部依赖或修改了入口名称时，才需要重新执行 `pip install -e .`)*
 
 ---
-
-## 💻 沉浸式指令指南
-
-当你在终端敲下 `pancli`，经历交互式密码鉴权后，你将步入：
-
-```text
-PanCLI [/文档库/你的姓名] $ _
-```
-这意味着你已处在当前沙河环境中。
 
 ### 基础文件系统导航
 - `pwd` - 我在哪？打印当下云盘内的绝对路径。
@@ -113,5 +103,5 @@ PanCLI [/文档库/你的姓名] $ _
 
 本项目的发展经历了彻底的重构与现代化演进，在此特别鸣谢和声明以下前置开源项目与参考资料：
 
-- **基座灵感**：本项目的初始非 REPL 终端代码逻辑分叉自并参考了开源项目 [xdedss/dist_bhpan](https://github.com/xdedss/dist_bhpan) (现已年久失修)。我们在其基础上进行了几乎彻底的底层重写，修复了诸如 CSRF 鉴权拦截、Boolean 类型序列化错误等多处核心 Bug，抛弃了老式的 argparse 单次命令调度模式，并全面演进至本仓库呈现的**状态保持交互式 REPL 生态**。
+- **基座灵感**：本项目的初始非 REPL 终端代码逻辑分叉自并参考了开源项目 [xdedss/dist_bhpan](https://github.com/xdedss/dist_bhpan) (现已年久失修)。我们在其基础上进行了底层重写，修复了多处核心 Bug，抛弃了老式的 argparse 单次命令调度模式，并全面演进至本仓库呈现的**状态保持交互式 REPL 生态**。
 - **协议文档**：项目中新增与重构的各项网络传输层通讯代码，皆参照官方 AnyShare RESTful 开放文档进行严格校审与精编：[AnyShare 开放文档](https://developers.aishutech.com/openDoc?productId=1&versonId=30&docId=338)。

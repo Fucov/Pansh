@@ -10,7 +10,8 @@ import sys
 import time
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion, ThreadedCompleter
+from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.panel import Panel
@@ -26,6 +27,67 @@ from .core import (
 )
 
 console = Console()
+
+class AnyShareCompleter(Completer):
+    def __init__(self, shell: PanShell):
+        self.shell = shell
+        self.cmds = [
+            "ls", "cd", "pwd", "tree", "cat", "head", "tail", "touch",
+            "stat", "mkdir", "rm", "mv", "cp", "upload", "download",
+            "whoami", "logout", "su", "clear", "exit", "quit", "help"
+        ]
+        self._cache: dict[str, list[str]] = {}
+        self._path_cache: dict[str, str] = {}
+
+    def get_completions(self, document: Document, complete_event):
+        text = document.text_before_cursor
+        try:
+            args = shlex.split(text)
+        except ValueError:
+            return
+
+        if not text or (len(args) == 1 and not text.endswith(" ")):
+            word = args[0] if args else ""
+            for cmd in self.cmds:
+                if cmd.startswith(word):
+                    yield Completion(cmd, start_position=-len(word))
+            return
+
+        word = "" if text.endswith(" ") else args[-1]
+        cmd = args[0]
+
+        # 如果是 upload 补全本地文件
+        if cmd == "upload" and (len(args) == 2 if not text.endswith(" ") else len(args) == 1):
+            import glob
+            for match in glob.glob(word + "*"):
+                yield Completion(match, start_position=-len(word), display=os.path.basename(match))
+            return
+
+        # 其他场景当作远程路径补全
+        if "/" in word:
+            parts = word.rsplit("/", 1)
+            parent, prefix = parts[0] or "/", parts[1]
+        else:
+            parent, prefix = ".", word
+
+        try:
+            abs_parent = self.shell.abs_path(parent)
+            docid = self._path_cache.get(abs_parent)
+            if not docid:
+                info = self.shell.manager.get_resource_info_by_path(abs_parent.strip("/"))
+                if info and info.size == -1:
+                    docid = info.docid
+                    self._path_cache[abs_parent] = docid
+            
+            if docid:
+                if docid not in self._cache:
+                    dirs, files = self.shell.manager.list_dir(docid, by="name")
+                    self._cache[docid] = [d["name"] + "/" for d in dirs] + [f["name"] for f in files]
+                for name in self._cache[docid]:
+                    if name.startswith(prefix):
+                        yield Completion(name, start_position=-len(prefix))
+        except Exception:
+            pass
 
 class PanShell:
     """The interactive stateful shell."""
@@ -112,7 +174,10 @@ class PanShell:
 
     def run(self) -> None:
         self.login()
-        session = PromptSession(history=InMemoryHistory())
+        session = PromptSession(
+            history=InMemoryHistory(),
+            completer=ThreadedCompleter(AnyShareCompleter(self))
+        )
 
         while True:
             try:
@@ -136,20 +201,28 @@ class PanShell:
         console.print("[yellow]Unknown command. Type 'help'.[/yellow]")
 
     def cmd_help(self, args: list[str]) -> None:
-        table = Table(show_header=False, box=None)
-        cmds = [
-            ("ls [dir] [-h]", "列出目录"), ("cd <dir>", "改变目录"), ("pwd", "当前路径"),
-            ("tree [dir]", "树状图"), ("cat <file>", "打印文件"),
-            ("head/tail <file>", "截取内容"), ("touch <file>", "空文件"),
-            ("stat <path>", "元数据"), ("mkdir <dir>", "建目录"), ("rm <path> [-r]", "删除"),
-            ("mv/cp <src> <dst>", "移动/复制"), ("upload/download <args>", "上传/下载"),
-            ("whoami", "查看当前登录账号状态"), ("logout", "清除本地凭据并退出"),
-            ("su [username]", "切换账号"),
-            ("clear", "清屏"), ("exit/quit", "退出")
-        ]
-        for c, d in cmds:
-            table.add_row(c, d)
-        console.print(Panel(table, title="[bold]可用命令[/bold]", border_style="cyan"))
+        console.print("\n[bold]PanCLI 命令参考手册[/bold]\n")
+        
+        t_base = Table("命令", "描述", box=None, show_header=False)
+        for c, d in [("whoami", "查账户"), ("su [user]", "切账号"), ("logout", "清凭证"), ("clear", "清屏"), ("exit/quit", "退出")]:
+            t_base.add_row(c, d)
+        console.print(Panel(t_base, title="[cyan]环境与基础[/cyan]", border_style="cyan"))
+        
+        t_nav = Table("命令", "描述", box=None, show_header=False)
+        for c, d in [("ls [dir] [-h]", "列表"), ("cd <dir>", "切换目录"), ("pwd", "显示当前路径"), ("tree [dir]", "树状图"), ("stat <path>", "查元数据")]:
+            t_nav.add_row(c, d)
+        console.print(Panel(t_nav, title="[green]导航与属性[/green]", border_style="green"))
+        
+        t_fs = Table("命令", "描述", box=None, show_header=False)
+        for c, d in [("cat <file>", "打印全部内容"), ("head <file> [-n 行数]", "读头部行"), ("tail <file> [-n 行数]", "读尾部行"), ("touch <file>", "建空文件"), ("mkdir <dir>", "建目录"), ("rm <path> [-r]", "删除"), ("mv / cp", "移动或复制")]:
+            t_fs.add_row(c, d)
+        console.print(Panel(t_fs, title="[yellow]文件管理[/yellow]", border_style="yellow"))
+        
+        t_sync = Table("命令", "描述", box=None, show_header=False)
+        for c, d in [("upload <本地> [远程] [-r]", "批量推入云端"), ("download <远程> [本地] [-r]", "批量拖入本地")]:
+            t_sync.add_row(c, d)
+        console.print(Panel(t_sync, title="[magenta]传输管理[/magenta]", border_style="magenta"))
+
 
     def cmd_exit(self, args: list[str]) -> None: raise EOFError
     def cmd_quit(self, args: list[str]) -> None: raise EOFError
@@ -304,12 +377,63 @@ class PanShell:
         self._print_file(args[0])
 
     def cmd_head(self, args: list[str]) -> None:
-        if not args: return
-        self._print_file(args[0], limit=1024 * 10)  # Max 10k bytes for head
+        parser = argparse.ArgumentParser(prog="head", add_help=False)
+        parser.add_argument("path", nargs="?")
+        parser.add_argument("-n", "--lines", type=int, default=10)
+        try:
+            parsed = parser.parse_args(args)
+        except SystemExit: return
+        if not parsed.path: return
+        
+        target = self.abs_path(parsed.path).strip("/")
+        info = self.manager.get_resource_info_by_path(target)
+        if not info or info.size == -1: return
+
+        count = 0
+        try:
+            for chunk in self.manager.download_file_stream(info.docid):
+                lines = chunk.split(b"\n")
+                for i, line in enumerate(lines):
+                    if i < len(lines) - 1:
+                        sys.stdout.buffer.write(line + b"\n")
+                        count += 1
+                        if count >= parsed.lines: break
+                    else:
+                        sys.stdout.buffer.write(line)
+                if count >= parsed.lines: break
+            print()
+        except BrokenPipeError:
+            pass
 
     def cmd_tail(self, args: list[str]) -> None:
-        console.print("[yellow]尾部截流暂不完善，回退为全量打印。[/yellow]")
-        self.cmd_cat(args)
+        parser = argparse.ArgumentParser(prog="tail", add_help=False)
+        parser.add_argument("path", nargs="?")
+        parser.add_argument("-n", "--lines", type=int, default=10)
+        try:
+            parsed = parser.parse_args(args)
+        except SystemExit: return
+        if not parsed.path: return
+        
+        target = self.abs_path(parsed.path).strip("/")
+        info = self.manager.get_resource_info_by_path(target)
+        if not info or info.size == -1: return
+
+        import collections
+        window = collections.deque(maxlen=parsed.lines)
+        buffer = b""
+        try:
+            for chunk in self.manager.download_file_stream(info.docid):
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    window.append(line)
+            if buffer:
+                window.append(buffer)
+
+            for line in window:
+                sys.stdout.buffer.write(line + (b"" if line.endswith(b"\r") else b"\n"))
+        except BrokenPipeError:
+            pass
 
     def _print_file(self, path: str, limit: int = -1) -> None:
         target = self.abs_path(path).strip("/")
