@@ -1,0 +1,77 @@
+# ═══════════════════════════════════════════════════════════════
+# PanCLI Settings 配置文件
+# 路径: ./settings.yaml (与 pancli.py 同目录)
+# 环境变量: PANCILI_CONFIG 可覆盖默认路径
+# ═══════════════════════════════════════════════════════════════
+
+# ── 外观 ────────────────────────────────────────────────────
+# 主题模式: auto / dark / light
+theme: dark
+
+# ── 颜色（仅 light 模式生效，或覆盖 auto 检测结果）────────────
+#
+# 格式: Rich 颜色名 (cyan, green, yellow, red, blue, magenta, white, black)
+# 或 hex 色值: "#RRGGBB"
+#
+# 注意：避免使用纯黑 black (#000000) 和纯白 white (#FFFFFF)
+# 这两个颜色在某些终端下会导致文本不可见
+#
+colors:
+  # 普通文本色（建议不要改）
+  text: default
+
+  # 文件夹高亮色（浅色终端推荐 cyan，深色推荐 cyan）
+  folder: cyan
+
+  # 文件高亮色（浅色终端推荐 blue，深色推荐 white）
+  file: blue
+
+  # 成功/完成色
+  success: green
+
+  # 警告色
+  warning: yellow
+
+  # 错误色
+  error: red bold
+
+  # 链接/信息色
+  info: blue
+
+# ── 表格样式 ─────────────────────────────────────────────────
+table:
+  # 表头边框颜色
+  border: dim
+
+  # 表头背景色（空 = 透明）
+  header_style: bold
+
+# ── 传输设置 ─────────────────────────────────────────────────
+transfer:
+  # 默认并发数
+  default_jobs: 4
+
+  # 单次上传/下载块大小（字节），越小实时性越好但开销越大
+  chunk_size: 65536
+
+  # 超时时间（秒）
+  timeout: 60
+
+# ── 搜索设置 ─────────────────────────────────────────────────
+search:
+  # find 命令默认递归深度
+  default_depth: 3
+
+  # 最大递归深度（防止风控）
+  max_depth: 10
+
+# ── 网络设置 ─────────────────────────────────────────────────
+network:
+  # 最大重试次数
+  max_retries: 10
+
+  # 重试间隔（秒）
+  retry_backoff: 1
+
+  # 请求超时（秒）
+  request_timeout: 60

@@ -9,6 +9,7 @@ import time
 from typing import Any, AsyncIterator
 
 import httpx
+from httpx import Timeout
 
 from .config import CERT_FILE, get_data_dir
 
@@ -76,8 +77,8 @@ D/fayQ==
 -----END CERTIFICATE-----
 """
 
-_MAX_RETRIES = 10
-_RETRY_BACKOFF = 1  # seconds
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2  # seconds
 
 
 def _ensure_cert() -> str:
@@ -103,7 +104,7 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 def create_client(**kwargs: Any) -> httpx.Client:
     """创建一个预配置好 SSL 的 httpx.Client（同步）。"""
-    return httpx.Client(verify=_build_ssl_context(), timeout=60.0, **kwargs)
+    return httpx.Client(verify=_build_ssl_context(), timeout=Timeout(5.0, connect=5.0), **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -113,7 +114,7 @@ def create_client(**kwargs: Any) -> httpx.Client:
 
 def create_async_client(**kwargs: Any) -> httpx.AsyncClient:
     """创建一个预配置好 SSL 的 httpx.AsyncClient（异步）。"""
-    return httpx.AsyncClient(verify=_build_ssl_context(), timeout=60.0, **kwargs)
+    return httpx.AsyncClient(verify=_build_ssl_context(), timeout=Timeout(30.0, connect=5.0), **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
