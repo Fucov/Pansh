@@ -65,17 +65,18 @@ async def _download_single_file(
             progress.update(task_id, description=f"[cyan]⬇ {local_path.name} [cyan]0.0/s[dim] ...")
 
             with open(local_path, mode) as f:
-                async for chunk in manager._client.stream("GET", url, headers=headers):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    elapsed = time.time() - start_time
-                    speed = downloaded / elapsed if elapsed > 0 else 0
-                    progress.update(
-                        task_id,
-                        completed=downloaded,
-                        description=f"[cyan]⬇ {local_path.name} "
-                                    f"[green]{_sizeof_fmt(speed)}/s[/green]",
-                    )
+                async with manager._client.stream("GET", url, headers=headers) as response:
+                    async for chunk in response.aiter_bytes():
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed if elapsed > 0 else 0
+                        progress.update(
+                            task_id,
+                            completed=downloaded,
+                            description=f"[cyan]⬇ {local_path.name} "
+                                        f"[green]{_sizeof_fmt(speed)}/s[/green]",
+                        )
 
             task.transferred = downloaded
             task.status = TransferStatus.COMPLETED

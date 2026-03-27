@@ -1,4 +1,4 @@
-theme: light
+theme: dark
 colors:
   text: default
   folder: cyan

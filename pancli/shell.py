@@ -74,20 +74,23 @@ class _S:
     __slots__ = ("_cache",)
 
     def __init__(self) -> None:
-        self._cache: dict[str, Style] = {}
+        self._cache: dict[str, str] = {}
 
     def _refresh(self, dark: bool) -> None:
-        self._cache = get_styles(dark)
+        self._cache.clear()
+        raw = get_styles(dark)
+        for key, style in raw.items():
+            tag = str(style).strip()
+            if tag and tag != "none":
+                self._cache[key] = f"[{tag}]"
+            else:
+                self._cache[key] = "[/]"
 
     def __getattr__(self, key: str) -> str:
-        if key not in self._cache:
+        if not self._cache:
             s = load_settings()
             self._refresh(s.is_dark)
-        style: Style = self._cache[key]
-        return f"[{style}]" if str(style) else ""
-
-    def __getitem__(self, key: str) -> str:
-        return getattr(self, key)
+        return self._cache.get(key, "")
 
 
 S = _S()
@@ -147,7 +150,8 @@ def _tbl(*columns: tuple[str, str, str | None, str]) -> Table:
 
 
 def _refresh_styles() -> None:
-    """重新加载样式（theme 切换后调用）。"""
+    """重新加载样式（theme 切换后调用，清空缓存后按当前主题重建）。"""
+    S._cache.clear()
     S._refresh(load_settings().is_dark)
 
 
@@ -644,16 +648,16 @@ class PanShell:
                 border_style=self.settings.table_border,
                 min_width=80,
             )
-            t.add_column(f"{S.tbl_hdr}类型", width=5, style="cyan")
-            t.add_column(f"{S.tbl_hdr}名称", style="bold", min_width=20)
-            t.add_column(f"{S.tbl_hdr}创建者", style="cyan", min_width=14)
-            t.add_column(f"{S.tbl_hdr}大小", justify="right", style="green", width=10)
-            t.add_column(f"{S.tbl_hdr}修改时间", style="yellow", width=19)
+            t.add_column("类型", width=5, style="cyan")
+            t.add_column("名称", style="bold", min_width=20)
+            t.add_column("创建者", style="cyan", min_width=14)
+            t.add_column("大小", justify="right", style="green", width=10)
+            t.add_column("修改时间", style="yellow", width=19)
 
             for d in dirs:
                 t.add_row(
                     f"{S.folder}📁{S.dim}",
-                    d.name,
+                    f"{S.folder}{d.name}{S.dim}",
                     d.creator or "",
                     "",
                     _ts_fmt(d.modified),
@@ -662,7 +666,7 @@ class PanShell:
                 sz = _sizeof_fmt(f.size) if parsed.human else str(f.size)
                 t.add_row(
                     f"{S.file}📄{S.dim}",
-                    f.name,
+                    f"{S.file}{f.name}{S.dim}",
                     f.creator or "",
                     sz,
                     _ts_fmt(f.modified),
@@ -681,7 +685,7 @@ class PanShell:
             return
         meta = await self.manager.get_file_meta(info.docid)
         t = Table(title=f"📄 {target}", show_header=False, border_style=self.settings.table_border, box=None)
-        t.add_column(f"{S.info}Key", style="bold")
+        t.add_column(f"{S.info}Key{S.dim}", style="bold")
         t.add_column("Value")
         t.add_row("DocID", meta.docid)
         t.add_row("大小", _sizeof_fmt(meta.size))
@@ -707,7 +711,7 @@ class PanShell:
                     sub = node.add(f"{S.folder}📁 {d.name}{S.dim}")
                     await build(d.docid, sub, depth + 1)
                 for f in files:
-                    node.add(f"{S.file}📄{S.dim} {f.name} {S.dim}({_sizeof_fmt(f.size)}){S.dim}")
+                    node.add(f"{S.file}📄 {f.name}{S.dim} {S.dim}({_sizeof_fmt(f.size)}){S.dim}")
             except Exception:
                 pass
 
@@ -733,15 +737,16 @@ class PanShell:
             title=f"{S.title}搜索结果 ({len(results)} 项){S.dim}",
             show_header=True, border_style=self.settings.table_border, min_width=80,
         )
-        t.add_column(f"{S.tbl_hdr}类型", width=5, style="cyan")
-        t.add_column(f"{S.tbl_hdr}名称", style="bold", min_width=20)
-        t.add_column(f"{S.tbl_hdr}路径", style="dim", min_width=25)
-        t.add_column(f"{S.tbl_hdr}大小", justify="right", style="green", width=10)
-        t.add_column(f"{S.tbl_hdr}修改时间", style="yellow", width=19)
+        t.add_column("类型", width=5, style="cyan")
+        t.add_column("名称", style="bold", min_width=20)
+        t.add_column("路径", style="dim", min_width=25)
+        t.add_column("大小", justify="right", style="green", width=10)
+        t.add_column("修改时间", style="yellow", width=19)
         for r in results:
             icon = f"{S.folder}📁{S.dim}" if r.is_dir else f"{S.file}📄{S.dim}"
+            name = f"{S.folder if r.is_dir else S.file}{r.name}{S.dim}"
             t.add_row(
-                icon, r.name, r.path,
+                icon, name, r.path,
                 _sizeof_fmt(r.size) if not r.is_dir else "—",
                 _ts_fmt(r.modified),
             )
@@ -1004,9 +1009,9 @@ class PanShell:
             show_header=True, header_style="bold",
             border_style=self.settings.table_border, min_width=60,
         )
-        t.add_column(f"{S.tbl_hdr}#", width=4, style="cyan")
-        t.add_column(f"{S.tbl_hdr}文件名", style="bold", min_width=20)
-        t.add_column(f"{S.tbl_hdr}大小", justify="right", style="green", width=10)
+        t.add_column("#", width=4, style="cyan")
+        t.add_column("文件名", style="bold", min_width=20)
+        t.add_column("大小", justify="right", style="green", width=10)
         for i, (name, sz) in enumerate(items[:50], 1):
             t.add_row(str(i), os.path.basename(name), _sizeof_fmt(sz))
         if len(items) > 50:
