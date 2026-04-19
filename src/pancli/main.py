@@ -273,11 +273,15 @@ def _parse_download_targets(items: list[str] | None, has_selectors: bool) -> tup
     if has_selectors:
         if len(items) == 1:
             return items, "."
-        return items[:-1], items[-1]
+        if _looks_like_local_target(items[-1]) or (_resolve_local_path(items[-1]).exists() and _resolve_local_path(items[-1]).is_dir()):
+            return items[:-1], items[-1]
+        return items, "."
     if len(items) == 1:
         return items, "."
     local_target = _resolve_local_path(items[-1])
-    if _looks_like_local_target(items[-1]) or local_target.exists():
+    if _looks_like_local_target(items[-1]):
+        return items[:-1], items[-1]
+    if local_target.exists() and local_target.is_dir() and (Path(items[-1]).suffix == "" or any(sep in items[-1] for sep in ("/", "\\"))):
         return items[:-1], items[-1]
     return items, "."
 

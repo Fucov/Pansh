@@ -23,7 +23,7 @@ from .main import _login, _normalize_remote_path, app
 from .theme import UIOptions, create_console
 
 INTERACTIVE_COMMANDS = [
-    ("help [命令]", "显示 shell 帮助或指定命令的帮助。"),
+    ("help [command]", "显示 shell 帮助或指定 command 的帮助。"),
     ("clear, cls", "清空终端显示。"),
     ("exit, quit", "退出交互式 shell。"),
     ("pwd", "显示当前远端目录。"),
@@ -31,14 +31,14 @@ INTERACTIVE_COMMANDS = [
     ("lpwd", "显示当前本地目录。"),
     ("lcd [路径]", "切换本地工作目录。"),
     ("lls [路径]", "列出本地文件。"),
-    ("!<命令>", "执行本地 shell 命令。"),
+    ("!<command>", "执行本地 shell command。"),
 ]
 
 REMOTE_COMMANDS = [
     ("ls [路径]", "列出远端目录内容。"),
     ("tree [路径]", "以树形方式显示远端目录。"),
     ("stat <路径>", "查看文件或目录的详细信息。"),
-    ("find <关键字>", "在远端路径下按关键字查找。"),
+    ("find <keyword>", "在远端路径下按 keyword 查找。"),
     ("quota", "查看空间配额使用情况。"),
     ("mkdir <路径>", "创建远端目录。"),
     ("touch <路径>", "创建空文件。"),
@@ -135,8 +135,8 @@ class PanShell:
             Text("这些命令用于操作 AnyShare 远端文件和目录。", style="muted"),
             Text(""),
             Text("提示", style="accent"),
-            Text("  使用 '<命令> --help' 查看完整参数说明。", style="muted"),
-            Text("  在 shell 中，'<命令> -h' 会自动当作帮助处理。", style="muted"),
+            Text("  使用 '<command> --help' 查看完整参数说明。", style="muted"),
+            Text("  在 shell 中，'<command> -h' 会自动当作帮助处理。", style="muted"),
         )
         self.console.print(
             Panel.fit(

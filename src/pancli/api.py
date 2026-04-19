@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, AsyncIterator
 
@@ -11,6 +12,64 @@ from . import auth, network
 from .models import DirEntry, FileMetaData, LinkInfo, QuotaInfo, ResourceInfo, RevisionInfo, SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+def _next_compact_duplicate_name(name: str, existing_names: list[str]) -> str:
+    if name not in existing_names:
+        return name
+    stem, dot, suffix = name.partition(".")
+    tail = f".{suffix}" if dot else ""
+    pattern = re.compile(rf"^{re.escape(stem)}(?: ?\((\d+)\))?{re.escape(tail)}$")
+    max_index = 1
+    for existing in existing_names:
+        match = pattern.match(existing)
+        if not match:
+            continue
+        if match.group(1):
+            max_index = max(max_index, int(match.group(1)))
+        elif existing == name:
+            max_index = max(max_index, 1)
+    return f"{stem}({max_index + 1}){tail}"
+
+
+def _find_existing_upload_entry(files: list[DirEntry], name: str) -> DirEntry | None:
+    exact = next((item for item in files if item.name == name), None)
+    if exact is not None:
+        return exact
+    stem, dot, suffix = name.partition(".")
+    tail = f".{suffix}" if dot else ""
+    pattern = re.compile(rf"^{re.escape(stem)}(?: ?\((\d+)\))?{re.escape(tail)}$")
+    candidates: list[tuple[int, int, DirEntry]] = []
+    for item in files:
+        match = pattern.match(item.name)
+        if not match:
+            continue
+        number = int(match.group(1) or 0)
+        candidates.append((number, item.modified, item))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (row[0], row[1]))
+    return candidates[-1][2]
+
+
+async def _normalize_uploaded_name(
+    manager: "AsyncApiManager",
+    parent_dir_id: str,
+    *,
+    source_name: str,
+    previous_entry: DirEntry | None,
+) -> None:
+    if previous_entry is None or previous_entry.name == source_name:
+        return
+    for _ in range(5):
+        _, files = await manager.list_dir(parent_dir_id, by="name")
+        if any(item.name == source_name for item in files):
+            return
+        current = _find_existing_upload_entry(files, source_name)
+        if current is not None:
+            await manager.rename_file(current.docid, source_name)
+            return
+        await asyncio.sleep(0.2)
 
 
 class ApiManagerException(Exception):
@@ -277,16 +336,21 @@ class AsyncApiManager:
     ) -> str:
         edit_mode = False
         existing_file_id: str | None = None
+        upload_name = name
         if check_existence:
-            parent_dir = await self.get_resource_path(parent_dir_id)
-            existing_file_id = await self.get_resource_id(parent_dir + "/" + name)
+            _, files = await self.list_dir(parent_dir_id, by="name")
+            existing_names = [item.name for item in files]
+            existing = _find_existing_upload_entry(files, name)
+            existing_file_id = existing.docid if existing is not None else None
             edit_mode = existing_file_id is not None
+            if not edit_mode:
+                upload_name = _next_compact_duplicate_name(name, existing_names)
         upload_info = await self._post(
             "/file/osbeginupload",
             {
                 "docid": existing_file_id if edit_mode else parent_dir_id,
                 "length": stream_len if stream_len is not None else len(content),
-                "name": None if edit_mode else name,
+                "name": None if edit_mode else upload_name,
                 "reqmethod": "PUT",
             },
         )
@@ -303,6 +367,15 @@ class AsyncApiManager:
             client=self.client,
         )
         await self._post("/file/osendupload", {"docid": upload_info["docid"], "rev": upload_info["rev"]})
+        if edit_mode and existing is not None:
+            # Some AnyShare deployments keep duplicate-style names visible for a
+            # short while after edit-upload, so retry name normalization.
+            await _normalize_uploaded_name(
+                self,
+                parent_dir_id,
+                source_name=name,
+                previous_entry=existing,
+            )
         return upload_info["docid"]
 
     async def get_link(self, docid: str) -> LinkInfo | None:
