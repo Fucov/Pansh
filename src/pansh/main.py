@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import getpass
 import json
 import logging
 import os
@@ -16,12 +15,12 @@ import typer
 from rich.table import Table
 from rich.tree import Tree
 
-from .api import AsyncApiManager, InvalidRootException, WrongPasswordException
-from .auth import rsa_encrypt
+from .api import AsyncApiManager, InvalidRootException
 from .config import AUTH_FILE, load_config, save_config
-from .models import MatchField, SelectedRemoteItem, TransferStatus, TransferTask
+from .models import AppConfig, MatchField, SelectedRemoteItem, TransferStatus, TransferTask
 from .progress import format_bytes
 from .selectors import filter_remote_items, select_local_files
+from .session import Session, SessionController, SessionLoginError
 from .settings import get_settings_path, load_settings, reload_settings
 from .theme import UIOptions, create_console
 from .transfer import batch_download, batch_upload
@@ -31,6 +30,10 @@ logger = logging.getLogger(__name__)
 app = typer.Typer(name="pansh", no_args_is_help=False, invoke_without_command=True)
 trash_app = typer.Typer(help="回收站管理")
 app.add_typer(trash_app, name="trash", hidden=True)
+ENV_REMOTE_CWD = "PANSH_REMOTE_CWD"
+ENV_LOCAL_CWD = "PANSH_LOCAL_CWD"
+LEGACY_ENV_REMOTE_CWD = "pansh_REMOTE_CWD"
+LEGACY_ENV_LOCAL_CWD = "pansh_LOCAL_CWD"
 
 
 @dataclass
@@ -40,14 +43,23 @@ class AppState:
     stderr_console: Any
     settings: Any
     debug: bool = False
+    once: bool = False
+    interactive: bool = False
+    session_config: AppConfig | None = None
+    session: Session | None = None
+    session_controller: SessionController | None = None
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
+def _env_get(primary: str, legacy: str) -> str | None:
+    return os.environ.get(primary) or os.environ.get(legacy)
+
+
 def _resolve_local_path(path: str) -> Path:
-    local_cwd = os.environ.get("pansh_LOCAL_CWD")
+    local_cwd = _env_get(ENV_LOCAL_CWD, LEGACY_ENV_LOCAL_CWD)
     resolved = Path(path).expanduser()
     if not resolved.is_absolute() and local_cwd:
         resolved = Path(local_cwd) / resolved
@@ -98,7 +110,7 @@ def _fmt_ts(value: int) -> str:
 
 
 def _normalize_remote_path(path: str, home_root: str) -> str:
-    cwd = os.environ.get("pansh_REMOTE_CWD", home_root)
+    cwd = _env_get(ENV_REMOTE_CWD, LEGACY_ENV_REMOTE_CWD) or home_root
     if path in ("", "."):
         raw = cwd
     elif path.startswith("/"):
@@ -117,54 +129,73 @@ def _normalize_remote_path(path: str, home_root: str) -> str:
     return "/" + "/".join(parts)
 
 
-async def _login(console: Any) -> tuple[AsyncApiManager, str]:
+def _should_persist_login(state: AppState, no_store: bool = False) -> bool:
+    return not state.once and not no_store
+
+
+def _clear_saved_login() -> None:
     cfg = load_config()
-    username = cfg.username or console.input("Username: ")
-    encrypted = cfg.encrypted
-    password: str | None = None
-    if not encrypted or not cfg.store_password:
-        password = getpass.getpass("Password: ")
-        encrypted = rsa_encrypt(password, cfg.pubkey)
-        if cfg.store_password:
-            cfg.encrypted = encrypted
-    for attempt in range(3):
-        manager = AsyncApiManager(
-            cfg.host,
-            username,
-            password,
-            cfg.pubkey,
-            encrypted=encrypted,
-            cached_token=cfg.cached_token.token or None,
-            cached_expire=cfg.cached_token.expires or None,
+    cfg.username = None
+    cfg.encrypted = None
+    cfg.cached_token.token = ""
+    cfg.cached_token.expires = 0
+    save_config(cfg)
+
+
+def _runtime_config(state: AppState) -> AppConfig:
+    if state.session_config is None:
+        state.session_config = load_config()
+    return state.session_config
+
+
+async def _login(
+    console: Any,
+    *,
+    state: AppState,
+    no_store: bool = False,
+    force_reauth: bool = False,
+) -> tuple[AsyncApiManager, str]:
+    started = time.perf_counter()
+    controller = state.session_controller or SessionController()
+    state.session_controller = controller
+    try:
+        session = await controller.require_session(
+            state=state,
+            console=console,
+            no_store=no_store,
+            force_reauth=force_reauth,
         )
-        try:
-            with console.status("Connecting..."):
-                started = time.perf_counter()
-                await manager.initialize()
-                logger.debug("login took %.3fs", time.perf_counter() - started)
-            cfg.username = username
-            cfg.cached_token.token = manager._tokenid
-            cfg.cached_token.expires = manager._expires
-            save_config(cfg)
-            entrydoc = await manager.get_entrydoc()
-            if not entrydoc:
-                await manager.close()
-                _error("无法读取入口文档库。")
-            return manager, "/" + entrydoc[0]["name"]
-        except WrongPasswordException:
-            await manager.close()
-            if attempt == 2:
-                break
-            console.print("密码错误，请重试。", style="warning")
-            password = getpass.getpass("Password: ")
-            encrypted = rsa_encrypt(password, cfg.pubkey)
-            cfg.encrypted = encrypted
-    _error("认证失败。")
-    raise RuntimeError("unreachable")
+        logger.debug("login/session acquire took %.3fs", time.perf_counter() - started)
+        return session.manager, session.home_path
+    except SessionLoginError as exc:
+        _error(str(exc))
+        raise RuntimeError("unreachable")
 
 
 async def _with_manager(ctx: typer.Context) -> tuple[AsyncApiManager, str]:
-    return await _login(_state(ctx).console)
+    state = _state(ctx)
+    if state.session is not None and state.session_controller is not None:
+        try:
+            manager = state.session_controller.make_manager(state=state)
+            await manager.initialize()
+            state.session_controller.sync_manager_state(state=state, manager=manager)
+            return manager, state.session.home_path
+        except SessionLoginError:
+            pass
+    return await _login(state.console, state=state)
+
+
+async def _release_manager(ctx: typer.Context, manager: AsyncApiManager | None = None) -> None:
+    state = _state(ctx)
+    if manager is not None:
+        shared_manager = state.session.manager if state.session is not None else None
+        if manager is not shared_manager:
+            await manager.close()
+            return
+    if state.interactive:
+        return
+    if state.session_controller is not None:
+        await state.session_controller.close(state=state)
 
 
 async def _collect_remote_items(
@@ -292,12 +323,23 @@ def cli_callback(
     version: bool = typer.Option(False, "--version", help="显示版本号并退出。"),
     whoami: bool = typer.Option(False, "--whoami", help="显示当前账号信息。"),
     logout: bool = typer.Option(False, "--logout", help="删除缓存的凭据和 token。"),
+    no_store_login: bool = typer.Option(
+        False,
+        "--no-store-login",
+        "--once",
+        "-once",
+        help="仅本次进程/当前 shell 会话登录，不写入本地 token。",
+    ),
     theme: str = typer.Option("auto", "--theme", help="主题：auto/dark/light/plain。"),
     plain: bool = typer.Option(False, "--plain", help="使用高兼容纯文本输出。"),
     no_color: bool = typer.Option(False, "--no-color", help="禁用颜色输出。"),
     debug: bool = typer.Option(False, "--debug", help="启用调试日志。"),
 ) -> None:
     _configure_logging(debug)
+    if isinstance(ctx.obj, AppState):
+        state = ctx.obj
+        state.debug = debug
+        return
     settings = load_settings()
     ui = UIOptions(
         theme_mode=theme if theme != "auto" else settings.theme_mode,
@@ -310,18 +352,18 @@ def cli_callback(
         stderr_console=create_console(ui, stderr=True),
         settings=settings,
         debug=debug,
+        once=no_store_login,
+        session_controller=SessionController(),
     )
     state = _state(ctx)
     if version:
         state.console.print(__version__)
         raise typer.Exit()
     if logout:
-        cfg = load_config()
-        cfg.username = None
-        cfg.encrypted = None
-        cfg.cached_token.token = ""
-        cfg.cached_token.expires = 0
-        save_config(cfg)
+        if state.session_controller is not None and state.session is not None:
+            _run(state.session_controller.logout(state=state))
+        else:
+            _clear_saved_login()
         state.console.print(f"已删除缓存凭据：{AUTH_FILE}")
         raise typer.Exit()
     if whoami and ctx.invoked_subcommand is None:
@@ -330,8 +372,45 @@ def cli_callback(
     if ctx.invoked_subcommand is None:
         from .shell import run_interactive_shell
 
-        run_interactive_shell(ui)
+        run_interactive_shell(state)
         raise typer.Exit()
+
+
+@app.command()
+def login(
+    ctx: typer.Context,
+    no_store: bool = typer.Option(False, "--no-store", help="仅本次会话有效，不写入本地 token。"),
+) -> None:
+    async def runner() -> None:
+        state = _state(ctx)
+        manager, home = await _login(state.console, state=state, no_store=no_store, force_reauth=True)
+        try:
+            if _should_persist_login(state, no_store):
+                state.console.print(f"登录成功，已更新本地凭据缓存。home: {home}")
+            else:
+                state.console.print(f"登录成功，仅本次会话有效。home: {home}")
+        finally:
+            await _release_manager(ctx, manager)
+
+    _run(runner())
+
+
+@app.command("logout")
+def logout_command(ctx: typer.Context) -> None:
+    async def runner() -> None:
+        state = _state(ctx)
+        if state.session_controller is not None and state.session is not None:
+            persistent = state.session.mode == "persistent"
+            await state.session_controller.logout(state=state)
+            if persistent:
+                state.console.print(f"已注销并删除本地凭据：{AUTH_FILE}")
+            else:
+                state.console.print("已结束临时会话。")
+            return
+        _clear_saved_login()
+        state.console.print(f"已删除缓存凭据：{AUTH_FILE}")
+
+    _run(runner())
 
 
 @app.command("whoami")
@@ -343,7 +422,7 @@ def whoami_command(
         state = _state(ctx)
         manager, home = await _with_manager(ctx)
         try:
-            cfg = load_config()
+            cfg = _runtime_config(state)
             payload = {
                 "host": cfg.host,
                 "username": cfg.username,
@@ -361,7 +440,7 @@ def whoami_command(
                 table.add_row(key, str(value or ""))
             state.console.print(table)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -452,7 +531,7 @@ def ls(
                 )
             state.console.print(table)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -486,7 +565,7 @@ def tree(
             await walk(info.docid, root, 0)
             state.console.print(root)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -527,7 +606,7 @@ def stat(
             table.add_row("tags", ", ".join(meta.tags) if meta.tags else "-")
             state.console.print(table)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -567,7 +646,7 @@ def find(
                 )
             state.console.print(table)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -583,7 +662,7 @@ def search_command(
     find(ctx, keyword, path, depth, json_output)
 
 
-@app.command()
+@app.command(hidden=True)
 def quota(
     ctx: typer.Context,
     json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
@@ -605,7 +684,7 @@ def quota(
             table.add_row("rate", quota_info.space_rate or "-")
             state.console.print(table)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -619,7 +698,7 @@ def mkdir(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
         except InvalidRootException as exc:
             _error(str(exc))
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -635,7 +714,7 @@ def touch(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
             parent_id = await manager.create_dirs_by_path(parent)
             await manager.upload_file(parent_id, name, b"", stream_len=0)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -660,7 +739,7 @@ def rm(
             else:
                 await manager.delete_file(info.docid)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -691,7 +770,7 @@ async def _move_or_copy(ctx: typer.Context, src: str, dst: str, *, force: bool, 
         if new_name != dst_name:
             await manager.rename_file(new_id, dst_name)
     finally:
-        await manager.close()
+        await _release_manager(ctx, manager)
 
 
 @app.command()
@@ -738,12 +817,12 @@ def cat(
                 lines = lines[-tail:]
             typer.echo("\n".join(lines))
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
 
-@app.command()
+@app.command(hidden=True)
 def link(
     ctx: typer.Context,
     path: str = typer.Argument(...),
@@ -776,7 +855,7 @@ def link(
             if result.password:
                 state.console.print(f"密码：{result.password}")
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -817,7 +896,8 @@ def upload(
             _confirm(state.console, yes, "继续上传吗？")
             tasks: list[TransferTask] = []
             for item in selected:
-                remote_path = f"{remote_dir.rstrip('/')}/{item.relative_path.replace('\\', '/')}"
+                relative_path = item.relative_path.replace("\\", "/")
+                remote_path = f"{remote_dir.rstrip('/')}/{relative_path}"
                 parent = "/".join(remote_path.strip("/").split("/")[:-1])
                 parent_id = await manager.create_dirs_by_path(parent)
                 tasks.append(
@@ -835,7 +915,7 @@ def upload(
                     state.stderr_console.print(f"上传失败 {task.local_path}: {task.error}")
                 raise typer.Exit(code=1)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -910,12 +990,12 @@ def download(
                     state.stderr_console.print(f"下载失败 {task.remote_path}: {task.error}")
                 raise typer.Exit(code=1)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
 
-@app.command()
+@app.command(hidden=True)
 def revisions(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -935,12 +1015,12 @@ def revisions(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
                 table.add_row(item.rev, format_bytes(item.size), _fmt_ts(item.modified), item.editor or "-")
             state.console.print(table)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
 
-@app.command("restore-revision")
+@app.command("restore-revision", hidden=True)
 def restore_revision(
     ctx: typer.Context,
     path: str = typer.Argument(...),
@@ -955,7 +1035,7 @@ def restore_revision(
                 _error(f"不是文件：{target}")
             await manager.restore_revision(info.docid, rev)
         finally:
-            await manager.close()
+            await _release_manager(ctx, manager)
 
     _run(runner())
 
@@ -979,7 +1059,7 @@ def trash_rm() -> None:
 def shell(ctx: typer.Context) -> None:
     from .shell import run_interactive_shell
 
-    run_interactive_shell(_state(ctx).ui)
+    run_interactive_shell(_state(ctx))
 
 
 def main() -> None:

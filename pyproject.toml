@@ -5,29 +5,39 @@ build-backend = "hatchling.build"
 [project]
 name = "pansh"
 dynamic = ["version"]
-description = "AnyShare / 北航网盘 CLI with Typer, Rich, and asyncio"
+description = "AnyShare CLI for browsing, searching, uploading, and downloading files"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "LZR" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
 dependencies = [
-  "httpx>=0.27.0",
-  "platformdirs>=4.2.0",
-  "prompt-toolkit>=3.0.43",
-  "pydantic>=2.7.0",
-  "pyyaml>=6.0",
-  "rich>=13.7.1",
-  "rsa>=4.9",
-  "typer>=0.12.0",
+  "httpx>=0.25,<1",
+  "platformdirs>=3.0,<5",
+  "prompt-toolkit>=3.0.36,<4",
+  "pydantic>=2.4,<3",
+  "pyyaml>=6,<7",
+  "rich>=13.5,<14",
+  "rsa>=4.9,<5",
+  "typer>=0.9,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "build>=1.2.2",
-  "mypy>=1.10.0",
-  "pytest>=8.0.0",
-  "ruff>=0.4.0",
-  "twine>=6.2.0",
+  "build>=1.0",
+  "mypy>=1.8",
+  "pytest>=7.4",
+  "ruff>=0.3",
+  "twine>=5",
 ]
 
 [project.scripts]

@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pansh.settings import Settings, ensure_settings_file
+from pansh.settings import Settings, get_settings_path
 
 
-def test_settings_file_is_created(monkeypatch, tmp_path: Path) -> None:
-    settings_path = tmp_path / "settings.yaml"
-    monkeypatch.setenv("pansh_CONFIG", str(settings_path))
-    created = ensure_settings_file()
-    assert created == settings_path
-    assert created.exists()
-    settings = Settings(created)
+def test_settings_path_honors_env_override(monkeypatch) -> None:
+    settings_path = Path.cwd() / "settings.yaml"
+    monkeypatch.setenv("PANSH_CONFIG", str(settings_path))
+    assert get_settings_path() == settings_path
+
+
+def test_settings_reads_existing_file() -> None:
+    settings = Settings(Path("settings.yaml"))
     assert settings.theme_mode == "auto"
     assert settings.default_jobs == 4

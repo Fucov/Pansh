@@ -10,9 +10,9 @@ from typing import Any
 
 import yaml
 
-from .config import get_config_dir
+from .config import ENV_CONFIG_PATH, LEGACY_ENV_CONFIG_PATH, get_config_dir
 
-ENV_SETTINGS_PATH = "pansh_CONFIG"
+ENV_SETTINGS_PATH = ENV_CONFIG_PATH
 
 
 def default_settings_text() -> str:
@@ -24,7 +24,7 @@ def default_settings_text() -> str:
 
 
 def get_settings_path() -> Path:
-    override = os.environ.get(ENV_SETTINGS_PATH)
+    override = os.environ.get(ENV_SETTINGS_PATH) or os.environ.get(LEGACY_ENV_CONFIG_PATH)
     if override:
         return Path(override).expanduser().resolve()
     return get_config_dir() / "settings.yaml"
@@ -81,10 +81,10 @@ class Settings:
         cursor[parts[-1]] = value
 
     def _apply_env_overrides(self) -> None:
-        theme = os.environ.get("pansh_THEME")
+        theme = os.environ.get("PANSH_THEME") or os.environ.get("pansh_THEME")
         if theme:
             self.set("theme.mode", theme)
-        jobs = os.environ.get("pansh_JOBS")
+        jobs = os.environ.get("PANSH_JOBS") or os.environ.get("pansh_JOBS")
         if jobs:
             self.set("transfer.default_jobs", int(jobs))
 

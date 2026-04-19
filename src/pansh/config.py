@@ -12,10 +12,12 @@ from .models import AppConfig
 
 APP_NAME = "pansh"
 LEGACY_APP_NAME = "bhpan"
+ENV_CONFIG_PATH = "PANSH_CONFIG"
+LEGACY_ENV_CONFIG_PATH = "pansh_CONFIG"
 
 
 def get_config_dir() -> Path:
-    override = os.environ.get("pansh_CONFIG")
+    override = os.environ.get(ENV_CONFIG_PATH) or os.environ.get(LEGACY_ENV_CONFIG_PATH)
     if override:
         path = Path(override).expanduser().resolve()
         if path.suffix:
