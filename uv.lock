@@ -683,7 +683,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "rsa" },
-    { name = "twine" },
     { name = "typer" },
 ]
 
@@ -693,6 +692,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "twine" },
 ]
 
 [package.metadata]
@@ -708,7 +708,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.7.1" },
     { name = "rsa", specifier = ">=4.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
-    { name = "twine", specifier = ">=6.2.0" },
+    { name = "twine", marker = "extra == 'dev'", specifier = ">=6.2.0" },
     { name = "typer", specifier = ">=0.12.0" },
 ]
 provides-extras = ["dev"]
