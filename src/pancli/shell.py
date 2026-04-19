@@ -185,6 +185,8 @@ class PanShell:
         try:
             if len(argv) == 2 and argv[1] == "-h":
                 argv = [argv[0], "--help"]
+            # Run Typer commands in a worker thread so command handlers can
+            # safely use asyncio.run() without nesting inside the shell loop.
             await asyncio.to_thread(
                 get_command(app).main,
                 args=argv,
