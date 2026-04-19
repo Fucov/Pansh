@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -142,7 +141,7 @@ async def batch_upload(
                             def __init__(self) -> None:
                                 self.transferred = 0
 
-                            def __iter__(self) -> Iterator[bytes]:
+                            async def __aiter__(self):
                                 while True:
                                     chunk = handle.read(settings.chunk_size)
                                     if not chunk:

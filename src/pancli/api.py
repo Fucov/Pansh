@@ -295,7 +295,13 @@ class AsyncApiManager:
             key, _, value = raw_header.partition(": ")
             if key and value:
                 headers[key] = value
-        await network.async_put_file(upload_info["authrequest"][1], headers, content, client=self.client)
+        await network.async_put_file(
+            upload_info["authrequest"][1],
+            headers,
+            content,
+            content_length=stream_len,
+            client=self.client,
+        )
         await self._post("/file/osendupload", {"docid": upload_info["docid"], "rev": upload_info["rev"]})
         return upload_info["docid"]
 

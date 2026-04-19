@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from .models import MatchField, SelectedLocalItem, SelectedRemoteItem
+
+
+def _resolve_local_root(root_text: str) -> Path:
+    local_cwd = os.environ.get("PANCLI_LOCAL_CWD")
+    path = Path(root_text).expanduser()
+    if not path.is_absolute() and local_cwd:
+        path = Path(local_cwd) / path
+    return path.resolve()
 
 
 def _compile_regex(pattern: str | None) -> re.Pattern[str] | None:
@@ -57,7 +66,7 @@ def select_local_files(
     compiled = _compile_regex(regex)
     matches: list[SelectedLocalItem] = []
     for root_text in roots:
-        root = Path(root_text).expanduser().resolve()
+        root = _resolve_local_root(root_text)
         base_dir = root.parent if root.is_file() else root
         explicit_current_dir = root_text in {".", "./"}
         prefix = "" if explicit_current_dir else (root.name if root.is_dir() else "")

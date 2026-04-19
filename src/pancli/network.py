@@ -237,14 +237,18 @@ async def async_put_file(
     headers: dict[str, str],
     content: bytes | Any,
     *,
+    content_length: int | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> None:
     own_client = client is None
     async_client = client or create_async_client()
     settings = load_settings()
+    request_headers = dict(headers)
+    if content_length is not None:
+        request_headers.setdefault("Content-Length", str(content_length))
     try:
         response = await _with_retry(
-            lambda: async_client.put(url, headers=headers, content=content),
+            lambda: async_client.put(url, headers=request_headers, content=content),
             retries=settings.max_retries,
             backoff=settings.retry_backoff,
         )

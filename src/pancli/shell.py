@@ -9,50 +9,48 @@ import subprocess
 from pathlib import Path
 
 import click
+import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
+from rich.console import Group
 from rich.panel import Panel
-import typer
+from rich.table import Table
+from rich.text import Text
 from typer.main import get_command
 
 from .api import AsyncApiManager
 from .main import _login, _normalize_remote_path, app
 from .theme import UIOptions, create_console
 
-SHELL_HELP_LINES = [
-    "Shell commands:",
-    "  help [command]      Show shell help or command help.",
-    "  exit, quit          Leave the interactive shell.",
-    "  pwd                 Print current remote directory.",
-    "  cd [path]           Change remote working directory.",
-    "  lpwd                Print current local directory.",
-    "  lcd [path]          Change local working directory.",
-    "  lls [path]          List local files.",
-    "  !<command>          Run a local shell command.",
-    "",
-    "Remote commands:",
-    "  ls [path]           List files in a remote directory.",
-    "  tree [path]         Show a remote directory tree.",
-    "  stat <path>         Show metadata for a file or directory.",
-    "  find <keyword>      Search by keyword under a path.",
-    "  search <keyword>    Alias of find.",
-    "  quota               Show storage quota usage.",
-    "  mkdir <path>        Create a remote directory.",
-    "  touch <path>        Create an empty remote file.",
-    "  rm <path>           Delete a remote file or directory.",
-    "  mv <src> <dst>      Move or rename a remote item.",
-    "  cp <src> <dst>      Copy a remote item.",
-    "  cat <path>          Print a remote text file.",
-    "  link ...            Manage share links.",
-    "  upload ...          Upload files; remote target defaults to current remote dir.",
-    "  download ...        Download files; local target defaults to current local dir.",
-    "  revisions <path>    List file revision history.",
-    "  restore-revision    Restore a file revision.",
-    "  trash ...           Trash-related commands.",
-    "",
-    "Tips:",
-    "  Use '<command> --help' for full parameter help.",
-    "  In shell, '<command> -h' is treated as help.",
+INTERACTIVE_COMMANDS = [
+    ("help [命令]", "显示 shell 帮助或指定命令的帮助。"),
+    ("clear, cls", "清空终端显示。"),
+    ("exit, quit", "退出交互式 shell。"),
+    ("pwd", "显示当前远端目录。"),
+    ("cd [路径]", "切换远端工作目录。"),
+    ("lpwd", "显示当前本地目录。"),
+    ("lcd [路径]", "切换本地工作目录。"),
+    ("lls [路径]", "列出本地文件。"),
+    ("!<命令>", "执行本地 shell 命令。"),
+]
+
+REMOTE_COMMANDS = [
+    ("ls [路径]", "列出远端目录内容。"),
+    ("tree [路径]", "以树形方式显示远端目录。"),
+    ("stat <路径>", "查看文件或目录的详细信息。"),
+    ("find <关键字>", "在远端路径下按关键字查找。"),
+    ("quota", "查看空间配额使用情况。"),
+    ("mkdir <路径>", "创建远端目录。"),
+    ("touch <路径>", "创建空文件。"),
+    ("rm <路径>", "删除远端文件或目录。"),
+    ("mv <源> <目标>", "移动或重命名远端项目。"),
+    ("cp <源> <目标>", "复制远端项目。"),
+    ("cat <路径>", "输出远端文本文件内容。"),
+    ("link ...", "管理分享链接。"),
+    ("upload ...", "上传文件；默认目标为当前远端目录。"),
+    ("download ...", "下载文件；默认目标为当前本地目录。"),
+    ("revisions <路径>", "列出文件历史版本。"),
+    ("restore-revision", "恢复指定历史版本。"),
 ]
 
 
@@ -93,8 +91,10 @@ class PanShell:
             await self.close()
 
     async def _show_command_help(self, command_name: str) -> None:
-        previous = os.environ.get("PANCLI_REMOTE_CWD")
+        previous_remote = os.environ.get("PANCLI_REMOTE_CWD")
+        previous_local = os.environ.get("PANCLI_LOCAL_CWD")
         os.environ["PANCLI_REMOTE_CWD"] = self.remote_cwd
+        os.environ["PANCLI_LOCAL_CWD"] = self.local_cwd
         try:
             await asyncio.to_thread(
                 get_command(app).main,
@@ -103,26 +103,69 @@ class PanShell:
                 standalone_mode=False,
             )
         except click.ClickException as exc:
-            self.console.print(f"command error: {exc.format_message()}", style="error")
+            self.console.print(f"命令错误：{exc.format_message()}", style="error")
         except typer.Exit:
             pass
         except SystemExit:
             pass
         finally:
-            if previous is None:
+            if previous_remote is None:
                 os.environ.pop("PANCLI_REMOTE_CWD", None)
             else:
-                os.environ["PANCLI_REMOTE_CWD"] = previous
+                os.environ["PANCLI_REMOTE_CWD"] = previous_remote
+            if previous_local is None:
+                os.environ.pop("PANCLI_LOCAL_CWD", None)
+            else:
+                os.environ["PANCLI_LOCAL_CWD"] = previous_local
+
+    def _render_help_section(self, title: str, rows: list[tuple[str, str]]) -> Group:
+        table = Table.grid(padding=(0, 2), expand=False)
+        table.add_column(style="accent", no_wrap=True)
+        table.add_column(style="text")
+        for command, description in rows:
+            table.add_row(command, description)
+        return Group(Text(title, style="accent"), table)
 
     def _print_help(self) -> None:
+        body = Group(
+            self._render_help_section("交互辅助命令", INTERACTIVE_COMMANDS),
+            Text("这些命令用于控制 shell 本身以及本地目录切换。", style="muted"),
+            Text(""),
+            self._render_help_section("远端文件命令", REMOTE_COMMANDS),
+            Text("这些命令用于操作 AnyShare 远端文件和目录。", style="muted"),
+            Text(""),
+            Text("提示", style="accent"),
+            Text("  使用 '<命令> --help' 查看完整参数说明。", style="muted"),
+            Text("  在 shell 中，'<命令> -h' 会自动当作帮助处理。", style="muted"),
+        )
         self.console.print(
             Panel.fit(
-                "\n".join(SHELL_HELP_LINES),
+                body,
                 title="PanCLI Shell",
-                border_style="accent",
+                border_style="text",
                 padding=(0, 1),
             )
         )
+
+    def _resolve_remote_path(self, target: str) -> str:
+        previous_remote = os.environ.get("PANCLI_REMOTE_CWD")
+        previous_local = os.environ.get("PANCLI_LOCAL_CWD")
+        os.environ["PANCLI_REMOTE_CWD"] = self.remote_cwd
+        os.environ["PANCLI_LOCAL_CWD"] = self.local_cwd
+        try:
+            candidate = _normalize_remote_path(target, self.home_root)
+        finally:
+            if previous_remote is None:
+                os.environ.pop("PANCLI_REMOTE_CWD", None)
+            else:
+                os.environ["PANCLI_REMOTE_CWD"] = previous_remote
+            if previous_local is None:
+                os.environ.pop("PANCLI_LOCAL_CWD", None)
+            else:
+                os.environ["PANCLI_LOCAL_CWD"] = previous_local
+        if candidate == "/":
+            return self.home_root
+        return candidate
 
     async def handle(self, text: str) -> bool:
         if text in {"exit", "quit"}:
@@ -130,15 +173,18 @@ class PanShell:
         if text in {"help", "?"}:
             self._print_help()
             return False
+        if text in {"clear", "cls"}:
+            self.console.clear()
+            return False
         if text.startswith("!"):
             completed = subprocess.run(text[1:], cwd=self.local_cwd, shell=True)
             if completed.returncode != 0:
-                self.console.print(f"local command failed: {completed.returncode}")
+                self.console.print(f"本地命令执行失败：{completed.returncode}")
             return False
         try:
             argv = shlex.split(text)
         except ValueError as exc:
-            self.console.print(f"parse error: {exc}", style="error")
+            self.console.print(f"解析命令失败：{exc}", style="error")
             return False
         if not argv:
             return False
@@ -154,10 +200,10 @@ class PanShell:
             return False
         if cmd == "cd":
             target = argv[1] if len(argv) > 1 else "."
-            candidate = _normalize_remote_path(target, self.home_root)
+            candidate = self._resolve_remote_path(target)
             info = await self.manager.get_resource_info_by_path(candidate.strip("/")) if self.manager else None
             if info is None or not info.is_dir:
-                self.console.print(f"not a directory: {candidate}")
+                self.console.print(f"不是目录：{candidate}")
                 return False
             self.remote_cwd = candidate
             return False
@@ -167,26 +213,27 @@ class PanShell:
         if cmd == "lcd":
             target = Path(argv[1] if len(argv) > 1 else self.local_cwd).expanduser().resolve()
             if not target.exists() or not target.is_dir():
-                self.console.print(f"not a directory: {target}")
+                self.console.print(f"不是目录：{target}")
                 return False
             self.local_cwd = str(target)
             return False
         if cmd == "lls":
             target = Path(argv[1] if len(argv) > 1 else self.local_cwd).expanduser().resolve()
             if not target.exists():
-                self.console.print(f"missing: {target}")
+                self.console.print(f"路径不存在：{target}")
                 return False
             for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
                 suffix = "/" if item.is_dir() else ""
                 self.console.print(item.name + suffix)
             return False
-        previous = os.environ.get("PANCLI_REMOTE_CWD")
+
+        previous_remote = os.environ.get("PANCLI_REMOTE_CWD")
+        previous_local = os.environ.get("PANCLI_LOCAL_CWD")
         os.environ["PANCLI_REMOTE_CWD"] = self.remote_cwd
+        os.environ["PANCLI_LOCAL_CWD"] = self.local_cwd
         try:
             if len(argv) == 2 and argv[1] == "-h":
                 argv = [argv[0], "--help"]
-            # Run Typer commands in a worker thread so command handlers can
-            # safely use asyncio.run() without nesting inside the shell loop.
             await asyncio.to_thread(
                 get_command(app).main,
                 args=argv,
@@ -194,22 +241,26 @@ class PanShell:
                 standalone_mode=False,
             )
         except click.ClickException as exc:
-            self.console.print(f"command error: {exc.format_message()}", style="error")
+            self.console.print(f"命令错误：{exc.format_message()}", style="error")
         except click.Abort:
-            self.console.print("aborted", style="warning")
+            self.console.print("操作已中止。", style="warning")
         except typer.Exit as exc:
             if exc.exit_code not in (None, 0):
-                self.console.print(f"command failed with exit code {exc.exit_code}", style="error")
+                self.console.print(f"命令执行失败，退出码 {exc.exit_code}", style="error")
         except SystemExit as exc:
             if exc.code not in (None, 0):
-                self.console.print(f"command failed with exit code {exc.code}", style="error")
+                self.console.print(f"命令执行失败，退出码 {exc.code}", style="error")
         except Exception as exc:
-            self.console.print(f"unexpected error: {exc}", style="error")
+            self.console.print(f"发生未预期错误：{exc}", style="error")
         finally:
-            if previous is None:
+            if previous_remote is None:
                 os.environ.pop("PANCLI_REMOTE_CWD", None)
             else:
-                os.environ["PANCLI_REMOTE_CWD"] = previous
+                os.environ["PANCLI_REMOTE_CWD"] = previous_remote
+            if previous_local is None:
+                os.environ.pop("PANCLI_LOCAL_CWD", None)
+            else:
+                os.environ["PANCLI_LOCAL_CWD"] = previous_local
         return False
 
 

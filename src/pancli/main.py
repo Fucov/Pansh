@@ -29,8 +29,8 @@ from .version import __version__
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(name="pancli", no_args_is_help=False, invoke_without_command=True)
-trash_app = typer.Typer(help="Trash management")
-app.add_typer(trash_app, name="trash")
+trash_app = typer.Typer(help="回收站管理")
+app.add_typer(trash_app, name="trash", hidden=True)
 
 
 @dataclass
@@ -44,6 +44,27 @@ class AppState:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _resolve_local_path(path: str) -> Path:
+    local_cwd = os.environ.get("PANCLI_LOCAL_CWD")
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute() and local_cwd:
+        resolved = Path(local_cwd) / resolved
+    return resolved.resolve()
+
+
+def _looks_like_local_target(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return (
+        path in {".", ".."}
+        or normalized.startswith("./")
+        or normalized.startswith("../")
+        or path.startswith("~")
+        or Path(path).is_absolute()
+        or normalized.endswith("/")
+        or normalized.endswith("\\")
+    )
 
 
 def _configure_logging(debug: bool) -> None:
@@ -128,17 +149,17 @@ async def _login(console: Any) -> tuple[AsyncApiManager, str]:
             entrydoc = await manager.get_entrydoc()
             if not entrydoc:
                 await manager.close()
-                _error("Unable to read entry document library.")
+                _error("无法读取入口文档库。")
             return manager, "/" + entrydoc[0]["name"]
         except WrongPasswordException:
             await manager.close()
             if attempt == 2:
                 break
-            console.print("Wrong password, try again.", style="warning")
+            console.print("密码错误，请重试。", style="warning")
             password = getpass.getpass("Password: ")
             encrypted = rsa_encrypt(password, cfg.pubkey)
             cfg.encrypted = encrypted
-    _error("Authentication failed.")
+    _error("认证失败。")
     raise RuntimeError("unreachable")
 
 
@@ -196,76 +217,81 @@ async def _collect_remote_items(
 
 def _preview_local(console: Any, items: list[Any], *, title: str) -> None:
     table = Table(title=title)
-    table.add_column("Name")
-    table.add_column("Relative Path")
-    table.add_column("Size", justify="right")
+    table.add_column("名称")
+    table.add_column("相对路径")
+    table.add_column("大小", justify="right")
     for item in items[:100]:
         table.add_row(item.basename, item.relative_path, format_bytes(item.size))
     if len(items) > 100:
         table.add_row("...", "...", "...")
     console.print(table)
-    console.print(f"{len(items)} item(s), {format_bytes(sum(item.size for item in items))}")
+    console.print(f"共 {len(items)} 项，{format_bytes(sum(item.size for item in items))}")
 
 
 def _preview_remote(console: Any, items: list[SelectedRemoteItem], *, title: str) -> None:
     table = Table(title=title)
-    table.add_column("Name")
-    table.add_column("Remote Path")
-    table.add_column("Size", justify="right")
+    table.add_column("名称")
+    table.add_column("远端路径")
+    table.add_column("大小", justify="right")
     for item in items[:100]:
         table.add_row(item.basename, item.remote_path, format_bytes(item.size))
     if len(items) > 100:
         table.add_row("...", "...", "...")
     console.print(table)
-    console.print(f"{len(items)} item(s), {format_bytes(sum(item.size for item in items))}")
+    console.print(f"共 {len(items)} 项，{format_bytes(sum(item.size for item in items))}")
 
 
 def _confirm(console: Any, yes: bool, prompt: str) -> None:
     if yes:
         return
     if not typer.confirm(prompt):
-        console.print("Cancelled.", style="muted")
+        console.print("已取消。", style="muted")
         raise typer.Exit(code=1)
 
 
-def _parse_upload_targets(items: list[str], has_selectors: bool) -> tuple[list[str], str]:
+def _parse_upload_targets(items: list[str] | None, has_selectors: bool) -> tuple[list[str], str]:
     if not items:
         if has_selectors:
             return ["."], "."
-        _error("upload requires at least one source")
+        _error("upload 至少需要一个本地源文件")
     if has_selectors:
         if len(items) == 1:
             return ["."], items[0]
         return items[:-1], items[-1]
     if len(items) == 1:
         return items, "."
+    if _resolve_local_path(items[-1]).exists():
+        return items, "."
     return items[:-1], items[-1]
 
 
-def _parse_download_targets(items: list[str], has_selectors: bool) -> tuple[list[str], str]:
+def _parse_download_targets(items: list[str] | None, has_selectors: bool) -> tuple[list[str], str]:
     if not items:
         if has_selectors:
             return ["."], "."
-        _error("download requires at least one source")
+        _error("download 至少需要一个远端源路径")
     if has_selectors:
         if len(items) == 1:
             return items, "."
         return items[:-1], items[-1]
     if len(items) == 1:
         return items, "."
-    return items[:-1], items[-1]
+    local_target = _resolve_local_path(items[-1])
+    if _looks_like_local_target(items[-1]) or local_target.exists():
+        return items[:-1], items[-1]
+    return items, "."
 
 
 @app.callback(invoke_without_command=True)
 def cli_callback(
     ctx: typer.Context,
-    version: bool = typer.Option(False, "--version", help="Show version and exit."),
-    whoami: bool = typer.Option(False, "--whoami", help="Show current account info."),
-    logout: bool = typer.Option(False, "--logout", help="Delete cached credentials and token."),
-    theme: str = typer.Option("auto", "--theme", help="Theme: auto/dark/light/plain."),
-    plain: bool = typer.Option(False, "--plain", help="Plain high-compatibility output."),
-    no_color: bool = typer.Option(False, "--no-color", help="Disable colors."),
-    debug: bool = typer.Option(False, "--debug", help="Enable debug logs."),
+    version: bool = typer.Option(False, "--version", help="显示版本号并退出。"),
+    whoami: bool = typer.Option(False, "--whoami", help="显示当前账号信息。"),
+    logout: bool = typer.Option(False, "--logout", help="删除缓存的凭据和 token。"),
+    theme: str = typer.Option("auto", "--theme", help="主题：auto/dark/light/plain。"),
+    plain: bool = typer.Option(False, "--plain", help="使用高兼容纯文本输出。"),
+    no_color: bool = typer.Option(False, "--no-color", help="禁用颜色输出。"),
+    debug: bool = typer.Option(False, "--debug", help="启用调试日志。"),
 ) -> None:
     _configure_logging(debug)
     settings = load_settings()
@@ -292,7 +318,7 @@ def cli_callback(
         cfg.cached_token.token = ""
         cfg.cached_token.expires = 0
         save_config(cfg)
-        state.console.print(f"Removed cached auth from {AUTH_FILE}")
+        state.console.print(f"已删除缓存凭据：{AUTH_FILE}")
         raise typer.Exit()
     if whoami and ctx.invoked_subcommand is None:
         whoami_command(ctx, json_output=False)
@@ -307,7 +333,7 @@ def cli_callback(
 @app.command("whoami")
 def whoami_command(
     ctx: typer.Context,
-    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -324,9 +350,9 @@ def whoami_command(
             if json_output:
                 _json_print(payload)
                 return
-            table = Table(title="Current User")
-            table.add_column("Field")
-            table.add_column("Value")
+            table = Table(title="当前用户")
+            table.add_column("字段")
+            table.add_column("值")
             for key, value in payload.items():
                 table.add_row(key, str(value or ""))
             state.console.print(table)
@@ -339,7 +365,7 @@ def whoami_command(
 @app.command()
 def config(
     ctx: typer.Context,
-    action: str = typer.Argument(..., help="show/get/set/reload/path"),
+    action: str = typer.Argument(..., help="操作：show/get/set/reload/path"),
     key: str | None = typer.Argument(None),
     value: str | None = typer.Argument(None),
 ) -> None:
@@ -353,28 +379,28 @@ def config(
         return
     if action == "get":
         if not key:
-            _error("config get requires a key")
+            _error("config get 需要提供键名")
         state.console.print(str(settings.get(key)))
         return
     if action == "set":
         if not key or value is None:
-            _error("config set requires key and value")
+            _error("config set 需要提供键名和值")
         settings.set(key, value)
         settings.save()
-        state.console.print(f"Updated {key}")
+        state.console.print(f"已更新 {key}")
         return
     if action == "reload":
-        state.console.print("Reloaded settings.")
+        state.console.print("已重新加载设置。")
         return
-    _error(f"Unknown config action: {action}")
+    _error(f"未知的 config 操作：{action}")
 
 
 @app.command()
 def ls(
     ctx: typer.Context,
-    path: str = typer.Argument(".", help="Remote path."),
-    human: bool = typer.Option(False, "--human", "-h", help="Human readable sizes."),
-    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+    path: str = typer.Argument(".", help="远端路径。"),
+    human: bool = typer.Option(False, "--human", "-h", help="以易读格式显示大小。"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -391,9 +417,9 @@ def ls(
                 return
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None:
-                _error(f"Path not found: {target}")
+                _error(f"路径不存在：{target}")
             if not info.is_dir:
-                _error(f"Not a directory: {target}")
+                _error(f"不是目录：{target}")
             dirs, files = await manager.list_dir(info.docid, by="name")
             payload = {
                 "path": target,
@@ -404,18 +430,18 @@ def ls(
                 _json_print(payload)
                 return
             if not dirs and not files:
-                state.console.print("(empty)", style="muted")
+                state.console.print("(空目录)", style="muted")
                 return
             table = Table(title=target)
-            table.add_column("Type")
-            table.add_column("Name")
-            table.add_column("Size", justify="right")
-            table.add_column("Modified")
+            table.add_column("类型")
+            table.add_column("名称")
+            table.add_column("大小", justify="right")
+            table.add_column("修改时间")
             for item in dirs:
-                table.add_row("dir", item.name, "-", _fmt_ts(item.modified))
+                table.add_row("目录", item.name, "-", _fmt_ts(item.modified))
             for item in files:
                 table.add_row(
-                    "file",
+                    "文件",
                     item.name,
                     format_bytes(item.size) if human else str(item.size),
                     _fmt_ts(item.modified),
@@ -430,7 +456,7 @@ def ls(
 @app.command()
 def tree(
     ctx: typer.Context,
-    path: str = typer.Argument(".", help="Remote path."),
+    path: str = typer.Argument(".", help="远端路径。"),
     depth: int = typer.Option(3, "--depth", "-d"),
 ) -> None:
     async def runner() -> None:
@@ -440,7 +466,7 @@ def tree(
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None or not info.is_dir:
-                _error(f"Not a directory: {target}")
+                _error(f"不是目录：{target}")
             root = Tree(target)
 
             async def walk(docid: str, node: Tree, current: int) -> None:
@@ -464,8 +490,8 @@ def tree(
 @app.command()
 def stat(
     ctx: typer.Context,
-    path: str = typer.Argument(..., help="Remote path."),
-    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+    path: str = typer.Argument(..., help="远端路径。"),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -474,7 +500,7 @@ def stat(
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None:
-                _error(f"Path not found: {target}")
+                _error(f"路径不存在：{target}")
             meta = await manager.get_file_meta(info.docid)
             payload = {
                 "path": target,
@@ -485,8 +511,8 @@ def stat(
                 _json_print(payload)
                 return
             table = Table(title=target)
-            table.add_column("Field")
-            table.add_column("Value")
+            table.add_column("字段")
+            table.add_column("值")
             table.add_row("docid", meta.docid)
             table.add_row("name", meta.name)
             table.add_row("size", format_bytes(meta.size))
@@ -508,7 +534,7 @@ def find(
     keyword: str = typer.Argument(...),
     path: str = typer.Option(".", "--path", "-p"),
     depth: int | None = typer.Option(None, "--depth", "-d"),
-    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -521,16 +547,16 @@ def find(
                 _json_print(payload)
                 return
             if not results:
-                state.console.print("No matches.", style="warning")
+                state.console.print("没有匹配结果。", style="warning")
                 raise typer.Exit(code=1)
-            table = Table(title=f"find {keyword}")
-            table.add_column("Type")
-            table.add_column("Path")
-            table.add_column("Size", justify="right")
-            table.add_column("Modified")
+            table = Table(title=f"查找：{keyword}")
+            table.add_column("类型")
+            table.add_column("路径")
+            table.add_column("大小", justify="right")
+            table.add_column("修改时间")
             for item in results:
                 table.add_row(
-                    "dir" if item.is_dir else "file",
+                    "目录" if item.is_dir else "文件",
                     item.path,
                     "-" if item.is_dir else format_bytes(item.size),
                     _fmt_ts(item.modified),
@@ -542,13 +568,13 @@ def find(
     _run(runner())
 
 
-@app.command(name="search")
+@app.command(name="search", hidden=True)
 def search_command(
     ctx: typer.Context,
     keyword: str = typer.Argument(...),
     path: str = typer.Option(".", "--path", "-p"),
     depth: int | None = typer.Option(None, "--depth", "-d"),
-    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
 ) -> None:
     find(ctx, keyword, path, depth, json_output)
 
@@ -556,7 +582,7 @@ def search_command(
 @app.command()
 def quota(
     ctx: typer.Context,
-    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -567,9 +593,9 @@ def quota(
             if json_output:
                 _json_print(payload)
                 return
-            table = Table(title="Quota")
-            table.add_column("Field")
-            table.add_column("Value")
+            table = Table(title="空间配额")
+            table.add_column("字段")
+            table.add_column("值")
             table.add_row("used", format_bytes(quota_info.quota_used))
             table.add_row("allocated", format_bytes(quota_info.quota_allocated))
             table.add_row("rate", quota_info.space_rate or "-")
@@ -622,10 +648,10 @@ def rm(
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None:
-                _error(f"Path not found: {target}")
+                _error(f"路径不存在：{target}")
             if info.is_dir:
                 if not recursive:
-                    _error("Directory removal needs --recursive")
+                    _error("删除目录需要加 --recursive")
                 await manager.delete_dir(info.docid)
             else:
                 await manager.delete_file(info.docid)
@@ -642,7 +668,7 @@ async def _move_or_copy(ctx: typer.Context, src: str, dst: str, *, force: bool, 
         dst_path = _normalize_remote_path(dst, home)
         src_info = await manager.get_resource_info_by_path(src_path.strip("/"))
         if src_info is None:
-            _error(f"Source not found: {src_path}")
+            _error(f"源路径不存在：{src_path}")
         dst_info = await manager.get_resource_info_by_path(dst_path.strip("/"))
         op = manager.copy_file if copy else manager.move_file
         if dst_info and dst_info.is_dir:
@@ -652,9 +678,9 @@ async def _move_or_copy(ctx: typer.Context, src: str, dst: str, *, force: bool, 
         dst_name = dst_path.strip("/").split("/")[-1]
         parent_info = await manager.get_resource_info_by_path(dst_parent)
         if parent_info is None:
-            _error(f"Destination parent not found: {dst_parent}")
+            _error(f"目标父目录不存在：{dst_parent}")
         if dst_info and not force:
-            _error(f"Destination exists: {dst_path}")
+            _error(f"目标已存在：{dst_path}")
         if dst_info and force:
             await manager.delete_file(dst_info.docid)
         new_id, new_name = await op(src_info.docid, parent_info.docid, rename_on_dup=True)
@@ -697,7 +723,7 @@ def cat(
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None or info.is_dir:
-                _error(f"Not a file: {target}")
+                _error(f"不是文件：{target}")
             data = bytearray()
             async for chunk in manager.download_file_stream(info.docid):
                 data.extend(chunk)
@@ -729,22 +755,22 @@ def link(
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None:
-                _error(f"Path not found: {target}")
+                _error(f"路径不存在：{target}")
             if create:
                 result = await manager.create_link(info.docid, end_time=expire or None, enable_pass=password)
                 state.console.print(result.link)
                 if result.password:
-                    state.console.print(f"password: {result.password}")
+                    state.console.print(f"密码：{result.password}")
                 return
             if delete:
                 await manager.delete_link(info.docid)
                 return
             result = await manager.get_link(info.docid)
             if result is None:
-                _error("No link exists for this path.")
+                _error("该路径没有分享链接。")
             state.console.print(result.link)
             if result.password:
-                state.console.print(f"password: {result.password}")
+                state.console.print(f"密码：{result.password}")
         finally:
             await manager.close()
 
@@ -754,14 +780,14 @@ def link(
 @app.command()
 def upload(
     ctx: typer.Context,
-    items: list[str] = typer.Argument(..., help="Sources followed by remote destination."),
-    glob_patterns: list[str] = typer.Option([], "--glob", help="Glob pattern to filter local files."),
-    regex: str | None = typer.Option(None, "--regex", help="Regex pattern to filter local files."),
-    exclude: list[str] = typer.Option([], "--exclude", help="Glob exclude pattern."),
-    recursive: bool = typer.Option(False, "--recursive", "-r"),
-    jobs: int | None = typer.Option(None, "--jobs", "-j"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
-    match_field: MatchField = typer.Option(MatchField.BASENAME, "--match-field"),
+    items: list[str] | None = typer.Argument(None, help="本地源路径，最后一个参数可选地作为远端目标目录。"),
+    glob_patterns: list[str] = typer.Option([], "--glob", help="按 glob 规则筛选本地文件。"),
+    regex: str | None = typer.Option(None, "--regex", help="按正则表达式筛选本地文件。"),
+    exclude: list[str] = typer.Option([], "--exclude", help="排除匹配的 glob 规则。"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="递归扫描目录。"),
+    jobs: int | None = typer.Option(None, "--jobs", "-j", help="并发任务数。"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认。"),
+    match_field: MatchField = typer.Option(MatchField.BASENAME, "--match-field", help="匹配字段：文件名或相对路径。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -771,7 +797,7 @@ def upload(
             if not (glob_patterns or regex or exclude):
                 for source in sources:
                     if Path(source).expanduser().is_dir() and not recursive:
-                        _error(f"Directory upload needs --recursive: {source}")
+                        _error(f"目录上传需要加 --recursive: {source}")
             remote_dir = _normalize_remote_path(remote, home)
             selected = select_local_files(
                 sources,
@@ -782,9 +808,9 @@ def upload(
                 match_field=match_field,
             )
             if not selected:
-                _error("No local files matched.")
-            _preview_local(state.console, selected, title="Upload Preview")
-            _confirm(state.console, yes, "Continue upload?")
+                _error("没有匹配到本地文件。")
+            _preview_local(state.console, selected, title="上传预览")
+            _confirm(state.console, yes, "继续上传吗？")
             tasks: list[TransferTask] = []
             for item in selected:
                 remote_path = f"{remote_dir.rstrip('/')}/{item.relative_path.replace('\\', '/')}"
@@ -802,7 +828,7 @@ def upload(
             failed = [task for task in tasks if task.status == TransferStatus.FAILED]
             if failed:
                 for task in failed:
-                    state.stderr_console.print(f"FAILED {task.local_path}: {task.error}")
+                    state.stderr_console.print(f"上传失败 {task.local_path}: {task.error}")
                 raise typer.Exit(code=1)
         finally:
             await manager.close()
@@ -813,16 +839,16 @@ def upload(
 @app.command()
 def download(
     ctx: typer.Context,
-    items: list[str] = typer.Argument(..., help="Remote source(s) followed by local destination."),
-    glob_patterns: list[str] = typer.Option([], "--glob", help="Glob pattern to filter remote files."),
-    regex: str | None = typer.Option(None, "--regex", help="Regex pattern to filter remote files."),
-    exclude: list[str] = typer.Option([], "--exclude", help="Glob exclude pattern."),
-    recursive: bool = typer.Option(False, "--recursive", "-r"),
-    search: bool = typer.Option(False, "--search", help="Prefer search mode when available."),
-    range_scan: bool = typer.Option(False, "--range", help="Treat remote arguments as search roots."),
-    jobs: int | None = typer.Option(None, "--jobs", "-j"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
-    match_field: MatchField = typer.Option(MatchField.BASENAME, "--match-field"),
+    items: list[str] | None = typer.Argument(None, help="远端源路径，最后一个参数可选地作为本地目标目录。"),
+    glob_patterns: list[str] = typer.Option([], "--glob", help="按 glob 规则筛选远端文件。"),
+    regex: str | None = typer.Option(None, "--regex", help="按正则表达式筛选远端文件。"),
+    exclude: list[str] = typer.Option([], "--exclude", help="排除匹配的 glob 规则。"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="递归扫描目录。"),
+    search: bool = typer.Option(False, "--search", help="优先使用远端搜索接口。"),
+    range_scan: bool = typer.Option(False, "--range", help="把给定远端路径当作搜索或扫描根目录。"),
+    jobs: int | None = typer.Option(None, "--jobs", "-j", help="并发任务数。"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认。"),
+    match_field: MatchField = typer.Option(MatchField.BASENAME, "--match-field", help="匹配字段：文件名或相对路径。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
@@ -833,14 +859,14 @@ def download(
                 items,
                 bool(glob_patterns or regex or exclude or recursive or search or range_scan),
             )
-            dest_dir = Path(dest).expanduser().resolve()
+            dest_dir = _resolve_local_path(dest)
             dest_dir.mkdir(parents=True, exist_ok=True)
             normalized_roots = [_normalize_remote_path(root, home) for root in roots]
             if not selector_mode and not recursive:
                 for root in normalized_roots:
                     info = await manager.get_resource_info_by_path(root.strip("/"))
                     if info and info.is_dir:
-                        _error(f"Directory download needs --recursive: {root}")
+                        _error(f"目录下载需要加 --recursive: {root}")
             remote_items: list[SelectedRemoteItem] = []
             for root in normalized_roots:
                 remote_items.extend(
@@ -859,11 +885,11 @@ def download(
                     match_field=match_field,
                 )
             if search and not remote_items:
-                state.stderr_console.print("Search mode fallback did not find any items.")
+                state.stderr_console.print("搜索模式回退后仍未找到任何文件。")
             if not remote_items:
-                _error("No remote files matched.")
-            _preview_remote(state.console, remote_items, title="Download Preview")
-            _confirm(state.console, yes, "Continue download?")
+                _error("没有匹配到远端文件。")
+            _preview_remote(state.console, remote_items, title="下载预览")
+            _confirm(state.console, yes, "继续下载吗？")
             tasks = [
                 TransferTask(
                     remote_path=item.remote_path,
@@ -877,7 +903,7 @@ def download(
             failed = [task for task in tasks if task.status == TransferStatus.FAILED]
             if failed:
                 for task in failed:
-                    state.stderr_console.print(f"FAILED {task.remote_path}: {task.error}")
+                    state.stderr_console.print(f"下载失败 {task.remote_path}: {task.error}")
                 raise typer.Exit(code=1)
         finally:
             await manager.close()
@@ -894,7 +920,7 @@ def revisions(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None or info.is_dir:
-                _error(f"Not a file: {target}")
+                _error(f"不是文件：{target}")
             revision_items = await manager.get_revisions(info.docid)
             table = Table(title=f"Revisions: {target}")
             table.add_column("rev")
@@ -922,7 +948,7 @@ def restore_revision(
             target = _normalize_remote_path(path, home)
             info = await manager.get_resource_info_by_path(target.strip("/"))
             if info is None or info.is_dir:
-                _error(f"Not a file: {target}")
+                _error(f"不是文件：{target}")
             await manager.restore_revision(info.docid, rev)
         finally:
             await manager.close()
@@ -932,17 +958,17 @@ def restore_revision(
 
 @trash_app.command("ls")
 def trash_ls() -> None:
-    _error("Trash list is not implemented yet.", code=2)
+    _error("回收站列表暂未实现。", code=2)
 
 
 @trash_app.command("restore")
 def trash_restore() -> None:
-    _error("Trash restore is not implemented yet.", code=2)
+    _error("回收站恢复暂未实现。", code=2)
 
 
 @trash_app.command("rm")
 def trash_rm() -> None:
-    _error("Trash remove is not implemented yet.", code=2)
+    _error("回收站删除暂未实现。", code=2)
 
 
 @app.command()
