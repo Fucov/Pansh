@@ -21,6 +21,7 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = [
+  "click~=8.3",
   "httpx>=0.25,<1",
   "platformdirs>=3.0,<5",
   "prompt-toolkit>=3.0.36,<4",
