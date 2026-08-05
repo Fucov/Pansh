@@ -1,4 +1,5 @@
 .idea/
+.worktrees/
 __pycache__/
 *.pyc
 Doc/

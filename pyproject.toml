@@ -37,7 +37,7 @@ dev = [
   "build>=1.0",
   "mypy>=1.8",
   "pytest>=7.4",
-  "ruff>=0.3",
+  "ruff==0.16.1",
   "twine>=5",
 ]
 
@@ -71,3 +71,12 @@ norecursedirs = [
   "build",
   "pytest-cache-files-*",
 ]
+
+[tool.ruff]
+required-version = "==0.16.1"
+target-version = "py310"
+
+[tool.ruff.lint]
+# Keep the pre-0.16 core defaults explicit; Ruff 0.16 expanded its implicit
+# defaults from 59 to 413 rules, which otherwise changes CI without a code edit.
+select = ["E4", "E7", "E9", "F"]

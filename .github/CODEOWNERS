@@ -1,0 +1,8 @@
+* @Fucov
+
+/.github/ @Fucov
+/pyproject.toml @Fucov
+/uv.lock @Fucov
+/src/pansh/version.py @Fucov
+/release-please-config.json @Fucov
+/.release-please-manifest.json @Fucov

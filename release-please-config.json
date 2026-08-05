@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "c141cfbffa47de60954c613d053ef083abefb52f",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "pansh",
+      "include-v-in-tag": true,
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "src/pansh/version.py"
+        }
+      ]
+    }
+  }
+}

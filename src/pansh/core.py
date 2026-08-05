@@ -33,7 +33,7 @@ from rich.tree import Tree
 
 from .api import AsyncApiManager, InvalidRootException, WrongPasswordException
 from .auth import rsa_encrypt
-from .config import load_config, save_config
+from .config import save_config
 from .models import AppConfig
 
 __version__ = "0.1"

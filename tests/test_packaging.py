@@ -21,11 +21,21 @@ def test_python_m_help() -> None:
     )
     assert result.returncode == 0
     assert "pansh" in result.stdout.lower()
-    assert "--once" in result.stdout
     assert "quota" not in result.stdout
     assert "restore-revision" not in result.stdout
     assert "revisions" not in result.stdout
     assert "link" not in result.stdout
+
+
+def test_once_alias_is_accepted() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pansh", "--once", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert pansh.__version__ in result.stdout
 
 
 def test_core_command_help_smoke() -> None:
