@@ -1,0 +1,443 @@
+name: Pansh PR Policy Bot
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] metadata-only, main-only; never checkout/download/execute PR code
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+
+# SECURITY: This privileged pull_request_target workflow must NEVER check out or
+# execute code from the PR. It may inspect GitHub API metadata only.
+permissions:
+  # Required for disablePullRequestAutoMerge; App credentials are created only
+  # after a true policy decision so authentication failure cannot block revocation.
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  decide:
+    if: github.repository == 'Fucov/Pansh'
+    name: policy decision
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Evaluate PR risk and publish the decision
+        id: policy
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          # Safe default: unset or any value other than lowercase-insensitive
+          # "true" keeps external code changes out of automatic merging.
+          ALLOW_EXTERNAL_CODE_AUTOMERGE: ${{ vars.ALLOW_EXTERNAL_CODE_AUTOMERGE }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const number = context.payload.pull_request.number;
+
+            // Always base decisions on the current PR, not the triggering event snapshot.
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: number
+            });
+
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner, repo, pull_number: number, per_page: 100 }
+            );
+            const isRename = (file) => file.previous_filename != null;
+            const pathsForFile = (file) => isRename(file)
+              ? [file.previous_filename, file.filename]
+              : [file.filename];
+            const classificationPaths = [
+              ...new Set(files.flatMap(pathsForFile))
+            ];
+            const labels = new Set((pr.labels || []).map((label) => label.name));
+
+            const marker = "<!-- pansh-pr-policy-bot -->";
+            const authorizationPattern =
+              /<!-- pansh-automerge-authorized-sha:([0-9a-f]{40}) -->/;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: number, per_page: 100 }
+            );
+            const existing = comments.filter(
+              (comment) =>
+                comment.user?.login === "github-actions[bot]" &&
+                typeof comment.body === "string" &&
+                comment.body.startsWith(marker)
+            );
+            const storedAuthorization = existing[0]?.body.match(
+              authorizationPattern
+            )?.[1] || "";
+
+            const isSynchronize = context.payload.action === "synchronize";
+
+            const isDocumentation = (path) =>
+              path === "README.md" ||
+              path === "LICENSE" ||
+              path.endsWith(".md") ||
+              path.startsWith("docs/");
+
+            const isTest = (path) => path.startsWith("tests/");
+
+            const isSensitive = (path) =>
+              path.startsWith(".github/workflows/") ||
+              path.startsWith(".github/actions/") ||
+              path === "pyproject.toml" ||
+              path === "uv.lock" ||
+              path === "src/pansh/version.py" ||
+              path === "release-please-config.json" ||
+              path === ".release-please-manifest.json" ||
+              path === ".github/CODEOWNERS";
+            const sensitivePaths = classificationPaths.filter(isSensitive);
+            const sensitiveFiles = files.filter((file) =>
+              pathsForFile(file).some(isSensitive)
+            );
+
+            const totalLines = pr.additions + pr.deletions;
+            const sizeIsSmall = pr.changed_files <= 12 && totalLines <= 600;
+            const docsOnly =
+              classificationPaths.length > 0 &&
+              classificationPaths.every(isDocumentation);
+            const testsAndDocsOnly =
+              classificationPaths.length > 0 &&
+              classificationPaths.every(
+                (path) => isTest(path) || isDocumentation(path)
+              );
+            const sourceChanged = classificationPaths.some(
+              (path) => path.startsWith("src/pansh/")
+            );
+            const testsChanged = classificationPaths.some(isTest);
+            const effectivePermission = async (username) => {
+              try {
+                const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner,
+                  repo,
+                  username
+                });
+                return data.user?.permissions?.admin
+                  ? "admin"
+                  : data.user?.permissions?.maintain
+                    ? "maintain"
+                    : data.user?.permissions?.push
+                      ? "write"
+                      : data.permission || "none";
+              } catch (error) {
+                if (error.status === 404) return "none";
+                throw error;
+              }
+            };
+            const trustedPermissions = new Set(["admin", "maintain", "write"]);
+            const authorPermission = await effectivePermission(pr.user.login);
+            const trustedAuthor = trustedPermissions.has(authorPermission);
+            const isAutomergeLabelEvent =
+              context.payload.action === "labeled" &&
+              context.payload.label?.name === "automerge";
+            const isAutomergeUnlabelEvent =
+              context.payload.action === "unlabeled" &&
+              context.payload.label?.name === "automerge";
+            const senderPermission =
+              isAutomergeLabelEvent && context.payload.sender?.type === "User"
+              ? await effectivePermission(context.payload.sender.login)
+              : "none";
+            const currentHumanAuthorization =
+              isAutomergeLabelEvent &&
+              context.payload.sender?.type === "User" &&
+              context.payload.pull_request.head.sha === pr.head.sha &&
+              labels.has("automerge") &&
+              trustedPermissions.has(senderPermission);
+            const authorizationInvalidated =
+              isSynchronize ||
+              isAutomergeUnlabelEvent ||
+              !labels.has("automerge");
+            const storedAuthorizationValid =
+              !authorizationInvalidated &&
+              storedAuthorization === pr.head.sha;
+            const maintainerOverride =
+              currentHumanAuthorization || storedAuthorizationValid;
+            const neverAutomerge = labels.has("never-automerge");
+            const allowExternal =
+              (process.env.ALLOW_EXTERNAL_CODE_AUTOMERGE || "").toLowerCase() === "true";
+
+            let autoMerge = false;
+            let reason = "";
+            let decisionRoute = "manual";
+
+            // Keep hard safety and test requirements ahead of every override.
+            if (pr.draft) {
+              reason = "PR 仍是 Draft。";
+            } else if (neverAutomerge) {
+              reason = "存在 `never-automerge` 标签。";
+            } else if (sensitivePaths.length > 0) {
+              reason = "修改了发布、依赖、权限或工作流等敏感文件。";
+            } else if (!sizeIsSmall) {
+              reason = "改动规模超过自动合并阈值（12 个文件或 600 行）。";
+            } else if (docsOnly || testsAndDocsOnly) {
+              autoMerge = true;
+              decisionRoute = "automatic";
+              reason = "仅修改文档或测试，且规模较小。";
+            } else if (sourceChanged && !testsChanged) {
+              reason = "修改了源码，但没有同步修改测试。";
+            } else if (trustedAuthor || maintainerOverride || allowExternal) {
+              autoMerge = true;
+              if (trustedAuthor) {
+                decisionRoute = "trusted";
+                reason = "可信协作者提交，改动较小，源码变更包含测试。";
+              } else if (allowExternal) {
+                decisionRoute = "external";
+                reason = "仓库已显式允许外部贡献者的低风险代码自动合并。";
+              } else {
+                decisionRoute = "maintainerOverride";
+                reason = "维护者已为当前提交授权 `automerge`。";
+              }
+            } else {
+              reason = "外部贡献者的代码改动需要维护者审阅或添加 `automerge` 标签。";
+            }
+
+            const autoMergeQuery = `
+              query PolicyAutoMergeState($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    id
+                    headRefOid
+                    autoMergeRequest { enabledAt }
+                  }
+                }
+              }
+            `;
+            const readAutoMergeState = async () => {
+              const result = await github.graphql(autoMergeQuery, { owner, repo, number });
+              return result.repository.pullRequest;
+            };
+
+            const initialAutoMergeState = await readAutoMergeState();
+            if (!autoMerge && initialAutoMergeState?.autoMergeRequest) {
+              // Re-read immediately before mutation so a stale run cannot revoke a
+              // newer head's approval.
+              const currentAutoMergeState = await readAutoMergeState();
+              if (
+                currentAutoMergeState?.autoMergeRequest &&
+                currentAutoMergeState.headRefOid === pr.head.sha
+              ) {
+                await github.graphql(
+                  `mutation DisablePolicyAutoMerge($pullRequestId: ID!) {
+                    disablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId}) {
+                      pullRequest { id }
+                    }
+                  }`,
+                  { pullRequestId: currentAutoMergeState.id }
+                );
+              } else if (currentAutoMergeState?.headRefOid !== pr.head.sha) {
+                core.warning("PR head changed during policy evaluation; skipped stale auto-merge revocation.");
+              }
+            }
+
+            if ((isSynchronize || !autoMerge) && labels.has("automerge")) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: number,
+                  name: "automerge"
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  core.warning(
+                    `Unable to remove automerge label (status ${error.status || "unknown"}); continuing policy cleanup.`
+                  );
+                }
+              }
+              labels.delete("automerge");
+            }
+
+            const escapeHtml = (value) => value
+              .replaceAll("&", "&amp;")
+              .replaceAll("<", "&lt;")
+              .replaceAll(">", "&gt;")
+              .replaceAll('"', "&quot;")
+              .replaceAll("'", "&#39;")
+              .replaceAll("\r", "\\r")
+              .replaceAll("\n", "\\n");
+            const formatPath = (path) => `<code>${escapeHtml(path)}</code>`;
+            const formatFile = (file) => isRename(file)
+              ? `${formatPath(file.previous_filename)} → ${formatPath(file.filename)}`
+              : formatPath(file.filename);
+            const visibleFiles = files
+              .slice(0, 20)
+              .map((file) => `- ${formatFile(file)}`)
+              .join("\n");
+            const moreFiles =
+              pr.changed_files > 20 ? `\n- …以及另外 ${pr.changed_files - 20} 个文件` : "";
+            const visibleSensitiveFiles = sensitiveFiles.slice(0, 20);
+            const moreSensitiveFiles = sensitiveFiles.length > 20
+              ? `，以及另外 ${sensitiveFiles.length - 20} 个敏感文件`
+              : "";
+            const authorizationMarker =
+              autoMerge && decisionRoute === "maintainerOverride"
+                ? `\n<!-- pansh-automerge-authorized-sha:${pr.head.sha} -->`
+                : "";
+
+            const body = `${marker}${authorizationMarker}
+            ## Pansh PR Policy Bot
+
+            **决策：${autoMerge ? "允许自动合并" : "需要人工处理"}**
+
+            原因：${reason}
+
+            | 指标 | 结果 |
+            |---|---:|
+            | 文件数 | ${pr.changed_files} |
+            | 新增行 | ${pr.additions} |
+            | 删除行 | ${pr.deletions} |
+            | 作者关系 | ${pr.author_association}（权限：${authorPermission}） |
+            | 修改源码 | ${sourceChanged ? "是" : "否"} |
+            | 修改测试 | ${testsChanged ? "是" : "否"} |
+            | 敏感文件 | ${visibleSensitiveFiles.length ? visibleSensitiveFiles.map(formatFile).join(", ") + moreSensitiveFiles : "无"} |
+
+            <details>
+            <summary>修改文件</summary>
+
+            ${visibleFiles}${moreFiles}
+
+            </details>
+
+            ${
+              autoMerge
+                ? "GitHub 原生 auto-merge 会在要求已满足时立即执行，否则会在全部必需检查通过后执行 squash merge；App token 确保合并后的 push 和 Release 工作流会被触发。"
+                : "维护者可以完成审阅后添加 `automerge` 标签重新触发策略。"
+            }
+            `;
+
+            if (existing.length > 0) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing[0].id,
+                body
+              });
+              for (const duplicate of existing.slice(1)) {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: duplicate.id
+                });
+              }
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: number,
+                body
+              });
+            }
+
+            const labelDefinitions = {
+              "bot:automerge": {
+                color: "1f883d",
+                description: "PR policy bot approved automatic merging"
+              },
+              "bot:review-required": {
+                color: "bf8700",
+                description: "PR policy bot requires maintainer review"
+              },
+              "bot:blocked": {
+                color: "cf222e",
+                description: "PR policy bot found a hard automatic-merge blocker"
+              }
+            };
+
+            for (const [name, definition] of Object.entries(labelDefinitions)) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github.rest.issues.createLabel({
+                    owner,
+                    repo,
+                    name,
+                    color: definition.color,
+                    description: definition.description
+                  });
+                } catch (createError) {
+                  if (createError.status !== 422) throw createError;
+                  try {
+                    // A concurrent run may have created the same label after our
+                    // initial 404. Only tolerate 422 when the label now exists.
+                    await github.rest.issues.getLabel({ owner, repo, name });
+                  } catch {
+                    throw createError;
+                  }
+                }
+              }
+            }
+
+            const targetLabel = autoMerge
+              ? "bot:automerge"
+              : (sensitivePaths.length > 0 || neverAutomerge)
+                ? "bot:blocked"
+                : "bot:review-required";
+
+            for (const name of Object.keys(labelDefinitions)) {
+              if (name === targetLabel) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: number,
+                  labels: [name]
+                });
+              } else {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number: number,
+                    name
+                  });
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+            }
+
+            core.setOutput("automerge", String(autoMerge));
+            core.setOutput("head_sha", pr.head.sha);
+            core.setOutput("pr_url", pr.html_url);
+
+      - name: Create auto-merge App token
+        id: app-token
+        if: steps.policy.outputs.automerge == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AUTOMERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Enable GitHub native auto-merge
+        if: steps.policy.outputs.automerge == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ steps.policy.outputs.pr_url }}
+          HEAD_SHA: ${{ steps.policy.outputs.head_sha }}
+        shell: bash
+        run: |
+          gh pr merge "$PR_URL" \
+            --repo "$GITHUB_REPOSITORY" \
+            --squash \
+            --auto \
+            --match-head-commit "$HEAD_SHA"

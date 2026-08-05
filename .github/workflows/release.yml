@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: create or update release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AUTOMERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    name: build release distributions
+    if: needs.release-please.outputs.release_created == 'true'
+    needs: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build==1.4.3 twine==6.2.0 hatchling==1.27.0
+      - name: Verify immutable release source and package version
+        env:
+          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          release_sha = os.environ["RELEASE_SHA"]
+          release_tag = os.environ["RELEASE_TAG"]
+          release_version = os.environ["RELEASE_VERSION"]
+          head_sha = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          if head_sha != release_sha:
+              raise SystemExit(
+                  f"checked-out commit {head_sha!r} does not match release SHA {release_sha!r}"
+              )
+
+          tag_result = subprocess.run(
+              ["git", "rev-list", "-n", "1", release_tag],
+              capture_output=True,
+              text=True,
+          )
+          tag_sha = tag_result.stdout.strip()
+          if tag_result.returncode != 0 or not tag_sha:
+              raise SystemExit(f"release tag {release_tag!r} could not be resolved")
+          if tag_sha != release_sha:
+              raise SystemExit(
+                  f"release tag {release_tag!r} resolves to {tag_sha!r}, not {release_sha!r}"
+              )
+
+          match = re.search(
+              r'^__version__\s*=\s*["\']([^"\']+)["\']',
+              Path("src/pansh/version.py").read_text(),
+              re.MULTILINE,
+          )
+          if match is None:
+              raise SystemExit("could not read __version__ from src/pansh/version.py")
+          source_version = match.group(1)
+          if source_version != release_version:
+              raise SystemExit(
+                  f"source version {source_version!r} does not match release version {release_version!r}"
+              )
+          expected_tag = f"v{source_version}"
+          if release_tag != expected_tag:
+              raise SystemExit(
+                  f"release tag {release_tag!r} does not match package version {expected_tag!r}"
+              )
+          PY
+      - name: Build distributions
+        run: python -m build --no-isolation
+      - name: Check distributions
+        run: python -m twine check dist/*
+      - name: Upload release distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-distributions
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+      - name: Smoke test wheel
+        run: |
+          set -- dist/*.whl
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "expected exactly one wheel in dist/, found $#" >&2
+            exit 1
+          fi
+          wheel_path="$(realpath "$1")"
+          smoke_dir="$(mktemp -d)"
+          python -m venv "$smoke_dir/venv"
+          source "$smoke_dir/venv/bin/activate"
+          python -m pip install --upgrade pip
+          cd "$smoke_dir"
+          python -m pip install "$wheel_path"
+          pansh --version
+          pansh --help > /dev/null
+          python -m pansh --help > /dev/null
+
+  publish:
+    name: publish to PyPI
+    if: needs.release-please.outputs.release_created == 'true'
+    needs:
+      - release-please
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pansh
+    permissions:
+      id-token: write
+    steps:
+      - name: Download release distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-distributions
+          path: dist
+      - name: Publish release distributions
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          attestations: true

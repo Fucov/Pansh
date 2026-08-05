@@ -36,15 +36,17 @@ def test_shell_resolve_local_path_uses_shell_cwd() -> None:
     assert shell._resolve_local_path("src") == nested.resolve()
 
 
-def test_local_completer_suggests_local_dirs_from_first_token() -> None:
+def test_local_completer_suggests_local_dirs_from_first_token(tmp_path: Path) -> None:
+    (tmp_path / "Docs").mkdir()
+
     shell = PanShell(_state())
-    shell.local_cwd = str(Path.cwd())
+    shell.local_cwd = str(tmp_path)
     completer = LocalPathCompleter(shell)
 
     completions = list(completer.get_completions(Document("D"), None))
     displays = {completion.text for completion in completions}
 
-    assert any(item in {"Doc/", "Doc\\"} for item in displays)
+    assert any(item in {"Docs/", "Docs\\"} for item in displays)
 
 
 def test_shell_bang_cd_updates_local_cwd() -> None:
