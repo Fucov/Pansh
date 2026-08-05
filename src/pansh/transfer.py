@@ -39,25 +39,20 @@ async def batch_download(
             average_rate="-",
             eta="-",
         )
-        rich_ids = {
-            id(task): progress.add_task(
-                task.remote_path,
-                total=max(task.size, 1),
-                filename=Path(task.remote_path).name,
-                status=task.status.value,
-                current_rate="-",
-                average_rate="-",
-                eta="-",
-            )
-            for task in tasks
-        }
-
         async def worker(task: TransferTask) -> None:
-            task.status = TransferStatus.RUNNING
-            meter = Speedometer(alpha=settings.ema_alpha)
-            rich_id = rich_ids[id(task)]
-            update_progress_fields(progress, rich_id, meter, max(task.size, 1), task.status)
             async with semaphore:
+                task.status = TransferStatus.RUNNING
+                meter = Speedometer(alpha=settings.ema_alpha)
+                rich_id = progress.add_task(
+                    task.remote_path,
+                    total=max(task.size, 1),
+                    filename=Path(task.remote_path).name,
+                    status=task.status.value,
+                    current_rate="-",
+                    average_rate="-",
+                    eta="-",
+                )
+                update_progress_fields(progress, rich_id, meter, max(task.size, 1), task.status)
                 try:
                     local_path = Path(task.local_path)
                     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,6 +82,8 @@ async def batch_download(
                     task.status = TransferStatus.FAILED
                     task.error = str(exc)
                     update_progress_fields(progress, rich_id, meter, max(task.size, 1), task.status)
+                finally:
+                    progress.remove_task(rich_id)
 
         await asyncio.gather(*(worker(task) for task in tasks))
     return tasks
