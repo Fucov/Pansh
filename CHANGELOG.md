@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.5](https://github.com/Fucov/Pansh/compare/v3.1.4...v3.1.5) (2026-08-06)
+
+
+### Bug Fixes
+
+* keep async sessions on one event loop ([#20](https://github.com/Fucov/Pansh/issues/20)) ([61b76c2](https://github.com/Fucov/Pansh/commit/61b76c2b62e3cb915b58a2d2a5d0402bcf9adc1a))
+
 ## [3.1.4](https://github.com/Fucov/Pansh/compare/v3.1.3...v3.1.4) (2026-08-06)
 
 
