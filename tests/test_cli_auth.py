@@ -7,7 +7,8 @@ from typer.testing import CliRunner
 
 from pansh.main import AppState, _whoami_payload, app
 from pansh.runtime import resolve_runtime_context
-from pansh.session import SessionController
+from pansh.models import SessionMode
+from pansh.session import RuntimeSession, SessionController, SessionState
 from pansh.settings import Settings
 from pansh.theme import UIOptions
 
@@ -136,14 +137,27 @@ def test_ephemeral_single_command_uses_ephemeral_runtime(monkeypatch, tmp_path: 
         async def list_dir(self, docid, by="name"):
             return [], []
 
-    async def fake_with_manager(ctx):
+    async def fake_with_runtime(ctx):
         modes.append(ctx.obj.runtime_context.session_mode.value)
-        return Manager(), "/home"
+        return RuntimeSession(
+            state=SessionState(
+                mode=SessionMode.EPHEMERAL,
+                profile_name="default",
+                host="example.test",
+                username="alice",
+                token="token",
+                expires_at=7200,
+                home_path="/home",
+                created_at=1,
+                pid=1,
+            ),
+            manager=Manager(),
+        )
 
     async def fake_release(ctx, manager=None):
         return None
 
-    monkeypatch.setattr("pansh.main._with_manager", fake_with_manager)
+    monkeypatch.setattr("pansh.main._with_runtime", fake_with_runtime)
     monkeypatch.setattr("pansh.main._release_manager", fake_release)
 
     result = runner.invoke(

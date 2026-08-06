@@ -19,16 +19,22 @@ class SessionLoginError(Exception):
 
 
 @dataclass
-class Session:
+class SessionState:
     mode: SessionMode
+    profile_name: str
     host: str
     username: str
     token: str = field(repr=False)
     expires_at: float
     home_path: str
-    manager: AsyncApiManager
     created_at: float
     pid: int
+
+
+@dataclass
+class RuntimeSession:
+    state: SessionState
+    manager: AsyncApiManager
 
 
 class SessionController:
@@ -44,7 +50,7 @@ class SessionController:
         self.clock = clock or time.time
         self.pid_getter = pid_getter or os.getpid
         self.manager_factory = manager_factory or AsyncApiManager
-        self.session: Session | None = None
+        self.runtime_session: RuntimeSession | None = None
 
     @property
     def store(self):
@@ -69,7 +75,7 @@ class SessionController:
         state: Any,
         console: Any,
         force_reauth: bool = False,
-    ) -> Session:
+    ) -> RuntimeSession:
         profile = self.runtime.profile_config
         record = self.store.load()
         username = record.username or console.input("Username: ")
@@ -111,20 +117,22 @@ class SessionController:
                     manager=manager,
                 )
                 self.store.save(updated)
-                session = Session(
+                session_state = SessionState(
                     mode=self.runtime.session_mode,
+                    profile_name=self.runtime.profile_name,
                     host=profile.host,
                     username=username,
                     token=manager._tokenid,
                     expires_at=manager._expires,
                     home_path="/" + entrydoc[0]["name"],
-                    manager=manager,
                     created_at=self.clock(),
                     pid=self.pid_getter(),
                 )
-                self.session = session
-                state.session = session
-                return session
+                runtime_session = RuntimeSession(state=session_state, manager=manager)
+                self.runtime_session = runtime_session
+                state.session_state = session_state
+                state.runtime_session = runtime_session
+                return runtime_session
             except WrongPasswordException:
                 await manager.close()
                 if attempt == 2:
@@ -135,22 +143,24 @@ class SessionController:
                 cached_token = CachedToken()
         raise SessionLoginError("认证失败。")
 
-    async def refresh_session(self, *, state: Any) -> Session:
-        if self.session is None:
+    async def refresh_session(self, *, state: Any) -> RuntimeSession:
+        if self.runtime_session is None:
             raise SessionLoginError("当前没有可复用的登录会话。")
-        await self.session.manager.initialize()
-        self.session.token = self.session.manager._tokenid
-        self.session.expires_at = self.session.manager._expires
+        await self.runtime_session.manager.initialize()
+        session_state = self.runtime_session.state
+        session_state.token = self.runtime_session.manager._tokenid
+        session_state.expires_at = self.runtime_session.manager._expires
         record = self.store.load()
         self.store.save(
             self._record_from_manager(
-                username=self.session.username,
+                username=session_state.username,
                 encrypted=record.encrypted,
-                manager=self.session.manager,
+                manager=self.runtime_session.manager,
             )
         )
-        state.session = self.session
-        return self.session
+        state.session_state = session_state
+        state.runtime_session = self.runtime_session
+        return self.runtime_session
 
     async def require_session(
         self,
@@ -158,10 +168,10 @@ class SessionController:
         state: Any,
         console: Any,
         force_reauth: bool = False,
-    ) -> Session:
-        if force_reauth and self.session is not None:
+    ) -> RuntimeSession:
+        if force_reauth and self.runtime_session is not None:
             await self.close(state=state)
-        if self.session is not None and not force_reauth:
+        if self.runtime_session is not None and not force_reauth:
             return await self.refresh_session(state=state)
         return await self.create_session(
             state=state,
@@ -170,11 +180,12 @@ class SessionController:
         )
 
     async def close(self, *, state: Any | None = None) -> None:
-        if self.session is not None:
-            await self.session.manager.close()
-        self.session = None
+        if self.runtime_session is not None:
+            await self.runtime_session.manager.close()
+        self.runtime_session = None
         if state is not None:
-            state.session = None
+            state.runtime_session = None
+            state.session_state = None
 
     async def logout(self, *, state: Any) -> None:
         self.store.clear()

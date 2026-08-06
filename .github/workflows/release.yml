@@ -196,6 +196,8 @@ jobs:
               )
           PY
       - name: Build distributions
+        env:
+          PANSH_BUILD_COMMIT: ${{ needs.release-please.outputs.sha }}
         run: python -m build --no-isolation
       - name: Check distributions
         run: python -m twine check dist/*

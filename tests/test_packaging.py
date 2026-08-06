@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -38,13 +39,19 @@ def test_once_alias_is_accepted() -> None:
     assert pansh.__version__ in result.stdout
 
 
-def test_core_command_help_smoke() -> None:
+def test_core_command_help_smoke(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.update(
+        PANSH_CONFIG=str(tmp_path / "config" / "settings.yaml"),
+        PANSH_AUTH_DIR=str(tmp_path / "state"),
+    )
     for command in ("ls", "upload", "download", "login"):
         result = subprocess.run(
             [sys.executable, "-m", "pansh", command, "--help"],
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
         assert result.returncode == 0
         assert command in result.stdout.lower()

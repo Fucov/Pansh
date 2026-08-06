@@ -1,6 +1,7 @@
 [build-system]
 requires = ["hatchling>=1.25.0"]
-build-backend = "hatchling.build"
+build-backend = "build_backend"
+backend-path = ["."]
 
 [project]
 name = "pansh"
@@ -56,6 +57,7 @@ packages = ["src/pansh"]
 include = [
   "/src",
   "/tests",
+  "/build_backend.py",
   "/README.md",
   "/pyproject.toml",
   "/LICENSE",
