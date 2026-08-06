@@ -27,10 +27,11 @@ def test_global_ephemeral_and_profile_options_resolve_runtime(tmp_path: Path) ->
         app,
         ["--profile", "work1", "--ephemeral", "profiles", "path", "work1"],
         env=_isolated_env(tmp_path),
+        terminal_width=80,
     )
 
     assert result.exit_code == 0
-    assert "work1" in result.stdout
+    assert "work1" in result.stdout.replace("\n", "")
 
 
 def test_shell_subcommand_accepts_profile_and_ephemeral_options(monkeypatch, tmp_path: Path) -> None:
