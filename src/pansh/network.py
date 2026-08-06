@@ -70,12 +70,14 @@ def _timeout() -> Timeout:
     )
 
 
-def create_client(**kwargs: Any) -> httpx.Client:
-    return httpx.Client(verify=_build_ssl_context(), timeout=_timeout(), **kwargs)
+def create_client(*, verify_tls: bool = True, **kwargs: Any) -> httpx.Client:
+    verify: ssl.SSLContext | bool = _build_ssl_context() if verify_tls else False
+    return httpx.Client(verify=verify, timeout=_timeout(), **kwargs)
 
 
-def create_async_client(**kwargs: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(verify=_build_ssl_context(), timeout=_timeout(), **kwargs)
+def create_async_client(*, verify_tls: bool = True, **kwargs: Any) -> httpx.AsyncClient:
+    verify: ssl.SSLContext | bool = _build_ssl_context() if verify_tls else False
+    return httpx.AsyncClient(verify=verify, timeout=_timeout(), **kwargs)
 
 
 def post_json(

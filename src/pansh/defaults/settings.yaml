@@ -1,6 +1,11 @@
 theme:
   mode: auto
 
+auth:
+  environment: personal
+  default_mode: persistent
+  default_profile: default
+
 ui:
   show_overview: true
 

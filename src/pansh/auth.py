@@ -61,6 +61,8 @@ def get_access_token(
     base_url: str,
     username: str,
     encrypted_password: str,
+    *,
+    verify_tls: bool = True,
 ) -> str:
     """
     完整 OAuth2 登录流程，返回 access_token。
@@ -77,7 +79,7 @@ def get_access_token(
     base_url = base_url.rstrip("/")
     state = urllib.parse.quote(base64.b64encode(b'{"windowId":3}'))
 
-    client = network.create_client(follow_redirects=True)
+    client = network.create_client(follow_redirects=True, verify_tls=verify_tls)
     try:
         # Step 1: 发起 OAuth2 授权请求，获取登录页面
         auth_url = (

@@ -6,6 +6,7 @@
       "release-type": "python",
       "package-name": "pansh",
       "include-v-in-tag": true,
+      "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {

@@ -6,6 +6,9 @@ from pathlib import Path
 from prompt_toolkit.document import Document
 
 from pansh.main import AppState
+from pansh.credentials import MemoryCredentialStore
+from pansh.models import ProfileConfig, SessionMode
+from pansh.runtime import RuntimeContext
 from pansh.session import SessionController
 from pansh.shell import LocalPathCompleter, PanShell
 from pansh.theme import UIOptions
@@ -17,12 +20,20 @@ class DummyConsole:
 
 
 def _state() -> AppState:
+    runtime = RuntimeContext(
+        profile_name="default",
+        session_mode=SessionMode.EPHEMERAL,
+        shared_environment=False,
+        profile_config=ProfileConfig(),
+        credential_store=MemoryCredentialStore(),
+    )
     return AppState(
         ui=UIOptions(),
         console=DummyConsole(),
         stderr_console=DummyConsole(),
         settings=None,
-        session_controller=SessionController(),
+        runtime_context=runtime,
+        session_controller=SessionController(runtime),
     )
 
 

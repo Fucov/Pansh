@@ -103,6 +103,7 @@ class AsyncApiManager:
         encrypted: str | None = None,
         cached_token: str | None = None,
         cached_expire: float | None = None,
+        verify_tls: bool = True,
     ) -> None:
         self.host = host
         self.base_url = f"https://{host}:443/api/efast/v1"
@@ -112,12 +113,13 @@ class AsyncApiManager:
         self._encrypted = encrypted
         self._tokenid = cached_token or ""
         self._expires = cached_expire or 0.0
+        self._verify_tls = verify_tls
         self._client: network.httpx.AsyncClient | None = None
 
     @property
     def client(self) -> network.httpx.AsyncClient:
         if self._client is None:
-            self._client = network.create_async_client()
+            self._client = network.create_async_client(verify_tls=self._verify_tls)
         return self._client
 
     async def initialize(self) -> None:
@@ -146,6 +148,7 @@ class AsyncApiManager:
                 f"https://{self.host}:443/",
                 self._username,
                 self._encrypt_password(),
+                verify_tls=self._verify_tls,
             )
             self._expires = time.time() + 3600
         except network.ApiException as exc:

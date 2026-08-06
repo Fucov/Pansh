@@ -64,43 +64,56 @@ pansh upload README.md .
 pansh download /home/file.pdf ./downloads
 ```
 
-## 登录模式
+## 登录模式与 profile
 
-`pansh` 支持两种登录模式：
+`pansh` 把非敏感连接配置与认证状态分开，并支持两种 session mode：
 
 ### 1. 持久化登录
 
-这是默认模式。登录成功后会写入本地凭据和 token cache，后续命令可复用：
+personal 环境默认使用 `persistent`。登录成功后只更新当前 profile 的用户名、加密凭据和 token，后续进程可以复用：
 
 ```bash
 pansh login
+pansh --profile kaiwei
+pansh login --profile kaiwei
 ```
 
-### 2. 一次性登录 / session-only
+### 2. Ephemeral 临时会话
 
-只在当前进程或当前 shell 会话有效，不写入本地 token：
+`ephemeral` 不读取、写入或清除任何磁盘认证状态；账号、加密密码和 token 只存在当前 Python 进程。它仍可读取指定 profile 的 `host`、`pubkey`、`verify_tls` 等非敏感连接配置：
 
 ```bash
-pansh --once
+pansh --ephemeral
+pansh --ephemeral ls .
+pansh --profile work1 --ephemeral
 ```
 
-或：
+共享服务器推荐显式启用 shared 环境：
 
 ```bash
-pansh --once ls .
-pansh --no-store-login
-pansh login --no-store
+PANSH_SHARED=1 pansh
 ```
 
 说明：
 
-- `--once` 是更短的入口，`--no-store-login` 也可继续使用。
-- `--once` / `--no-store-login` 适合直接进入 shell，或执行单条命令时临时登录。
-- `login --no-store` 只验证并建立当前进程会话，不更新本地缓存。
-- `whoami` 在 session-only 登录后同样可用。
-- 在交互式 shell 里，临时 token 会在整个会话期间保留；`exit` / `quit` / EOF / 异常退出后自然失效，不会落盘。
-- 如果当前是 session-only 会话，`logout` 只结束当前临时会话。
+- `PANSH_SHARED=1`、`--shared` 或 settings 中的 shared 环境默认选择 ephemeral，避免静默复用磁盘账号。
+- `--once` 和 `--no-store-login` 是 `--ephemeral` 的兼容别名。
+- 交互式 TTY 中，`pansh login --no-store` 会提示后直接进入同一进程的 ephemeral shell；退出后 session 自然销毁。
+- 非交互环境中的 `login --no-store` 会返回非零退出码，请改用 `pansh --ephemeral <command>`。
+- ephemeral shell 中多个命令复用同一个 manager；`exit`、`quit`、EOF 或 `logout` 后关闭。
+- ephemeral 的 `logout` 只清理内存，不会清除任何 persistent profile。
 - 如果当前是 persistent 会话，`logout` 会清除本地保存的凭据和 token。
+
+### Profile 管理
+
+```bash
+pansh profiles list
+pansh profiles create work1
+pansh profiles path work1
+pansh profiles delete work1
+```
+
+profile 名只允许字母、数字、`.`、`_` 和 `-`，不能使用路径。profile 用于避免误覆盖和复用其他 profile 的认证状态，但不是操作系统安全边界：共享同一个 Linux UID 的用户仍可读取该 UID 有权访问的文件。多人共用同一 UID 时应使用 ephemeral；如果需要真正隔离，请使用不同系统账号或容器权限边界。
 
 ## 常用命令
 
@@ -182,25 +195,39 @@ download -h
 
 典型路径：
 
-- Linux/macOS: `~/.config/pansh/`
-- Windows: `%APPDATA%\\pansh\\`
+- Linux 配置：`~/.config/pansh/`；认证状态：`~/.local/state/pansh/`
+- macOS：`~/Library/Application Support/pansh/` 对应的配置/状态目录
+- Windows：`%APPDATA%\\pansh\\` 对应的配置/状态目录
 
-主要文件：
+主要文件（实际根目录由 `platformdirs` 按平台解析）：
 
 - `settings.yaml`
-- `auth.json`
+- `profiles/<profile>/profile.yaml`：非敏感连接配置
+- 状态目录中的 `profiles/<profile>/auth.json`：当前 profile 的认证状态
+
+`profile.yaml` 可按需填写：
+
+```yaml
+host: bhpan.buaa.edu.cn
+verify_tls: true
+store_password: true
+```
 
 可通过环境变量覆盖：
 
 ```bash
 PANSH_CONFIG=/path/to/settings.yaml
+PANSH_AUTH_DIR=/private/state/directory
 ```
 
 补充说明：
 
 - 首次运行会自动生成默认 `settings.yaml`
-- session-only 登录不会写入本地 token
-- `auth.json` 用于持久化凭据与 token cache
+- `PANSH_PROFILE` 选择 profile；`PANSH_SESSION_MODE=ephemeral|persistent` 选择模式；`PANSH_SHARED=1` 开启 shared 默认值
+- 优先级为命令行 > 环境变量 > `settings.yaml` > 内置默认值
+- 旧 `~/.config/pansh/auth.json`（以及更早的 `bhpan/config.json`）只会在首次使用 persistent `default` profile 且新认证文件不存在时迁移；迁移前生成 `.bak` 备份，成功验证后删除旧文件
+- ephemeral 和非 default profile 都不会触发旧认证文件迁移
+- `PANSH_CONFIG` 及旧的 `pansh_CONFIG` 仍可用于覆盖 settings 路径
 
 ## 稳定性说明
 

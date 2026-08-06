@@ -6,21 +6,31 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
+from filelock import FileLock
 from rich.table import Table
 from rich.tree import Tree
 
 from .api import AsyncApiManager, InvalidRootException
-from .config import AUTH_FILE, load_config, save_config
-from .models import AppConfig, MatchField, SelectedRemoteItem, TransferStatus, TransferTask
+from .config import (
+    get_auth_file,
+    get_auth_dir,
+    get_config_dir,
+    get_profile_config_file,
+    save_profile_config,
+    validate_profile_name,
+)
+from .models import MatchField, ProfileConfig, SelectedRemoteItem, SessionMode, TransferStatus, TransferTask
 from .progress import format_bytes
 from .selectors import filter_remote_items, select_local_files
 from .session import Session, SessionController, SessionLoginError
+from .runtime import RuntimeContext, resolve_runtime_context
 from .settings import get_settings_path, load_settings, reload_settings
 from .theme import UIOptions, create_console
 from .transfer import batch_download, batch_upload
@@ -29,7 +39,9 @@ from .version import __version__
 logger = logging.getLogger(__name__)
 app = typer.Typer(name="pansh", no_args_is_help=False, invoke_without_command=True)
 trash_app = typer.Typer(help="回收站管理")
+profiles_app = typer.Typer(help="管理独立的连接配置和认证状态。")
 app.add_typer(trash_app, name="trash", hidden=True)
+app.add_typer(profiles_app, name="profiles")
 ENV_REMOTE_CWD = "PANSH_REMOTE_CWD"
 ENV_LOCAL_CWD = "PANSH_LOCAL_CWD"
 LEGACY_ENV_REMOTE_CWD = "pansh_REMOTE_CWD"
@@ -42,10 +54,9 @@ class AppState:
     console: Any
     stderr_console: Any
     settings: Any
+    runtime_context: RuntimeContext
     debug: bool = False
-    once: bool = False
     interactive: bool = False
-    session_config: AppConfig | None = None
     session: Session | None = None
     session_controller: SessionController | None = None
 
@@ -130,39 +141,63 @@ def _normalize_remote_path(path: str, home_root: str) -> str:
 
 
 def _should_persist_login(state: AppState, no_store: bool = False) -> bool:
-    return not state.once and not no_store
+    return state.runtime_context.session_mode is SessionMode.PERSISTENT and not no_store
 
 
-def _clear_saved_login() -> None:
-    cfg = load_config()
-    cfg.username = None
-    cfg.encrypted = None
-    cfg.cached_token.token = ""
-    cfg.cached_token.expires = 0
-    save_config(cfg)
+def _clear_saved_login(state: AppState) -> None:
+    state.runtime_context.credential_store.clear()
 
 
-def _runtime_config(state: AppState) -> AppConfig:
-    if state.session_config is None:
-        state.session_config = load_config()
-    return state.session_config
+def _replace_runtime(
+    state: AppState,
+    *,
+    profile_name: str | None = None,
+    ephemeral: bool = False,
+    shared: bool = False,
+) -> None:
+    if profile_name is None and not ephemeral and not shared:
+        return
+    runtime = resolve_runtime_context(
+        state.settings,
+        profile_name=profile_name or state.runtime_context.profile_name,
+        ephemeral=ephemeral or state.runtime_context.session_mode is SessionMode.EPHEMERAL,
+        shared=shared or state.runtime_context.shared_environment,
+    )
+    state.runtime_context = runtime
+    state.session_controller = SessionController(runtime)
+    state.session = None
+
+
+def _is_interactive_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _whoami_payload(state: AppState, *, username: str, home: str) -> dict[str, str]:
+    runtime = state.runtime_context
+    return {
+        "host": runtime.profile_config.host,
+        "username": username,
+        "home": home,
+        "session_mode": runtime.session_mode.value,
+        "profile": runtime.profile_name,
+        "auth_store": runtime.credential_store.describe(),
+        "settings_file": str(get_settings_path()),
+    }
 
 
 async def _login(
     console: Any,
     *,
     state: AppState,
-    no_store: bool = False,
     force_reauth: bool = False,
 ) -> tuple[AsyncApiManager, str]:
     started = time.perf_counter()
-    controller = state.session_controller or SessionController()
+    controller = state.session_controller or SessionController(state.runtime_context)
     state.session_controller = controller
     try:
         session = await controller.require_session(
             state=state,
             console=console,
-            no_store=no_store,
             force_reauth=force_reauth,
         )
         logger.debug("login/session acquire took %.3fs", time.perf_counter() - started)
@@ -176,10 +211,8 @@ async def _with_manager(ctx: typer.Context) -> tuple[AsyncApiManager, str]:
     state = _state(ctx)
     if state.session is not None and state.session_controller is not None:
         try:
-            manager = state.session_controller.make_manager(state=state)
-            await manager.initialize()
-            state.session_controller.sync_manager_state(state=state, manager=manager)
-            return manager, state.session.home_path
+            session = await state.session_controller.refresh_session(state=state)
+            return session.manager, session.home_path
         except SessionLoginError:
             pass
     return await _login(state.console, state=state)
@@ -323,13 +356,16 @@ def cli_callback(
     version: bool = typer.Option(False, "--version", help="显示版本号并退出。"),
     whoami: bool = typer.Option(False, "--whoami", help="显示当前账号信息。"),
     logout: bool = typer.Option(False, "--logout", help="删除缓存的凭据和 token。"),
-    no_store_login: bool = typer.Option(
+    profile: str | None = typer.Option(None, "--profile", help="选择认证 profile。"),
+    ephemeral: bool = typer.Option(
         False,
+        "--ephemeral",
         "--no-store-login",
         "--once",
         "-once",
         help="仅本次进程/当前 shell 会话登录，不写入本地 token。",
     ),
+    shared: bool = typer.Option(False, "--shared", help="按多人共享环境启动，默认使用 ephemeral。"),
     theme: str = typer.Option("auto", "--theme", help="主题：auto/dark/light/plain。"),
     plain: bool = typer.Option(False, "--plain", help="使用高兼容纯文本输出。"),
     no_color: bool = typer.Option(False, "--no-color", help="禁用颜色输出。"),
@@ -341,6 +377,15 @@ def cli_callback(
         state.debug = debug
         return
     settings = load_settings()
+    try:
+        runtime = resolve_runtime_context(
+            settings,
+            profile_name=profile,
+            ephemeral=ephemeral,
+            shared=shared,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     ui = UIOptions(
         theme_mode=theme if theme != "auto" else settings.theme_mode,
         plain=plain,
@@ -351,9 +396,9 @@ def cli_callback(
         console=create_console(ui),
         stderr_console=create_console(ui, stderr=True),
         settings=settings,
+        runtime_context=runtime,
         debug=debug,
-        once=no_store_login,
-        session_controller=SessionController(),
+        session_controller=SessionController(runtime),
     )
     state = _state(ctx)
     if version:
@@ -363,8 +408,8 @@ def cli_callback(
         if state.session_controller is not None and state.session is not None:
             _run(state.session_controller.logout(state=state))
         else:
-            _clear_saved_login()
-        state.console.print(f"已删除缓存凭据：{AUTH_FILE}")
+            _clear_saved_login(state)
+        state.console.print(f"已删除当前 profile 的认证状态：{state.runtime_context.credential_store.describe()}")
         raise typer.Exit()
     if whoami and ctx.invoked_subcommand is None:
         whoami_command(ctx, json_output=False)
@@ -380,15 +425,23 @@ def cli_callback(
 def login(
     ctx: typer.Context,
     no_store: bool = typer.Option(False, "--no-store", help="仅本次会话有效，不写入本地 token。"),
+    profile: str | None = typer.Option(None, "--profile", help="选择认证 profile。"),
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _login(state.console, state=state, no_store=no_store, force_reauth=True)
+        _replace_runtime(state, profile_name=profile, ephemeral=no_store)
+        if state.runtime_context.session_mode is SessionMode.EPHEMERAL:
+            if not _is_interactive_tty():
+                _error("临时登录不能供后续进程复用；请改用 pansh --ephemeral <command>。", code=2)
+            state.console.print("临时登录无法跨进程保存，正在进入 ephemeral shell。")
+            await _login(state.console, state=state, force_reauth=True)
+            from .shell import run_shell_with_state
+
+            await run_shell_with_state(state, login=False)
+            return
+        manager, home = await _login(state.console, state=state, force_reauth=True)
         try:
-            if _should_persist_login(state, no_store):
-                state.console.print(f"登录成功，已更新本地凭据缓存。home: {home}")
-            else:
-                state.console.print(f"登录成功，仅本次会话有效。home: {home}")
+            state.console.print(f"登录成功，已更新当前 profile 的凭据缓存。home: {home}")
         finally:
             await _release_manager(ctx, manager)
 
@@ -403,12 +456,16 @@ def logout_command(ctx: typer.Context) -> None:
             persistent = state.session.mode == "persistent"
             await state.session_controller.logout(state=state)
             if persistent:
-                state.console.print(f"已注销并删除本地凭据：{AUTH_FILE}")
+                state.console.print(
+                    f"已注销并删除当前 profile 的认证状态：{state.runtime_context.credential_store.describe()}"
+                )
             else:
                 state.console.print("已结束临时会话。")
             return
-        _clear_saved_login()
-        state.console.print(f"已删除缓存凭据：{AUTH_FILE}")
+        _clear_saved_login(state)
+        state.console.print(
+            f"已删除当前 profile 的认证状态：{state.runtime_context.credential_store.describe()}"
+        )
 
     _run(runner())
 
@@ -422,14 +479,7 @@ def whoami_command(
         state = _state(ctx)
         manager, home = await _with_manager(ctx)
         try:
-            cfg = _runtime_config(state)
-            payload = {
-                "host": cfg.host,
-                "username": cfg.username,
-                "home": home,
-                "auth_file": str(AUTH_FILE),
-                "settings_file": str(get_settings_path()),
-            }
+            payload = _whoami_payload(state, username=manager._username, home=home)
             if json_output:
                 _json_print(payload)
                 return
@@ -476,6 +526,58 @@ def config(
         state.console.print("已重新加载设置。")
         return
     _error(f"未知的 config 操作：{action}")
+
+
+@profiles_app.command("list")
+def profiles_list(ctx: typer.Context) -> None:
+    state = _state(ctx)
+    config_root = get_config_dir() / "profiles"
+    auth_root = get_auth_dir() / "profiles"
+    names = {path.parent.name for path in config_root.glob("*/profile.yaml")}
+    names.update(path.parent.name for path in auth_root.glob("*/auth.json"))
+    for name in sorted(names):
+        state.console.print(name)
+
+
+@profiles_app.command("create")
+def profiles_create(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    state = _state(ctx)
+    try:
+        profile = validate_profile_name(name)
+    except ValueError as exc:
+        _error(str(exc), code=2)
+    path = get_profile_config_file(profile)
+    if path.exists():
+        _error(f"profile 已存在：{profile}", code=2)
+    save_profile_config(profile, ProfileConfig())
+    state.console.print(f"已创建 profile：{profile}")
+
+
+@profiles_app.command("delete")
+def profiles_delete(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    state = _state(ctx)
+    try:
+        profile = validate_profile_name(name)
+    except ValueError as exc:
+        _error(str(exc), code=2)
+    profile_file = get_profile_config_file(profile)
+    auth_file = get_auth_file(profile)
+    auth_file.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(auth_file) + ".migration.lock"), FileLock(str(auth_file) + ".lock"):
+        profile_file.unlink(missing_ok=True)
+        auth_file.unlink(missing_ok=True)
+    state.console.print(f"已删除 profile：{profile}")
+
+
+@profiles_app.command("path")
+def profiles_path(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    state = _state(ctx)
+    try:
+        profile = validate_profile_name(name)
+    except ValueError as exc:
+        _error(str(exc), code=2)
+    state.console.print(f"profile: {get_profile_config_file(profile)}")
+    state.console.print(f"auth: {get_auth_file(profile)}")
 
 
 @app.command()
@@ -1056,10 +1158,17 @@ def trash_rm() -> None:
 
 
 @app.command()
-def shell(ctx: typer.Context) -> None:
+def shell(
+    ctx: typer.Context,
+    ephemeral: bool = typer.Option(False, "--ephemeral", help="使用仅当前进程有效的认证。"),
+    profile: str | None = typer.Option(None, "--profile", help="选择认证 profile。"),
+    shared: bool = typer.Option(False, "--shared", help="按多人共享环境启动。"),
+) -> None:
     from .shell import run_interactive_shell
 
-    run_interactive_shell(_state(ctx))
+    state = _state(ctx)
+    _replace_runtime(state, profile_name=profile, ephemeral=ephemeral, shared=shared)
+    run_interactive_shell(state)
 
 
 def main() -> None:

@@ -206,8 +206,18 @@ class PanShell:
             else:
                 os.environ[key] = previous_local
 
-    async def run(self) -> None:
-        await self.login()
+    async def run(self, *, login: bool = True) -> None:
+        if login:
+            if self.state.runtime_context.shared_environment:
+                self.console.print("当前为共享环境的临时私有会话；退出 shell 后登录状态即销毁。")
+            await self.login()
+        elif self.state.session is not None:
+            self.state.interactive = True
+            self.manager = self.state.session.manager
+            self.home_root = self.state.session.home_path
+            self.remote_cwd = self.home_root
+        else:
+            raise RuntimeError("进入 shell 前没有可用 session")
         session = PromptSession(history=InMemoryHistory(), completer=self.completer, complete_while_typing=True)
         try:
             while True:
@@ -397,6 +407,10 @@ class PanShell:
 
 def run_interactive_shell(state: AppState) -> None:
     try:
-        asyncio.run(PanShell(state).run())
+        asyncio.run(run_shell_with_state(state))
     except KeyboardInterrupt:
         pass
+
+
+async def run_shell_with_state(state: AppState, *, login: bool = True) -> None:
+    await PanShell(state).run(login=login)

@@ -15,6 +15,11 @@ class ThemeMode(str, Enum):
     PLAIN = "plain"
 
 
+class SessionMode(str, Enum):
+    PERSISTENT = "persistent"
+    EPHEMERAL = "ephemeral"
+
+
 class TransferStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -30,7 +35,7 @@ class MatchField(str, Enum):
 
 
 class CachedToken(BaseModel):
-    token: str = ""
+    token: str = Field(default="", repr=False)
     expires: float = 0.0
 
 
@@ -50,11 +55,30 @@ class AppConfig(BaseModel):
     host: str = "bhpan.buaa.edu.cn"
     pubkey: str = DEFAULT_PUBKEY
     username: str | None = None
-    encrypted: str | None = None
+    encrypted: str | None = Field(default=None, repr=False)
     store_password: bool = True
     verify_tls: bool = True
     cached_token: CachedToken = Field(default_factory=CachedToken)
     theme: ThemeMode = ThemeMode.AUTO
+
+
+class ProfileConfig(BaseModel):
+    """Non-sensitive connection settings for one profile."""
+
+    revision: int = 1
+    host: str = "bhpan.buaa.edu.cn"
+    pubkey: str = DEFAULT_PUBKEY
+    store_password: bool = True
+    verify_tls: bool = True
+
+
+class AuthRecord(BaseModel):
+    """Sensitive authentication state owned by one credential store."""
+
+    revision: int = 1
+    username: str | None = None
+    encrypted: str | None = Field(default=None, repr=False)
+    cached_token: CachedToken = Field(default_factory=CachedToken)
 
 
 class ResourceInfo(BaseModel):

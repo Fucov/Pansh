@@ -9,5 +9,4 @@ Doc/
 pytest-cache-files-*/
 dist/
 build/
-tests
 tmp*
