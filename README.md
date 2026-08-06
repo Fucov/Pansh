@@ -163,6 +163,13 @@ pansh stat /home/file.pdf --json
 pansh find 报告 --json
 ```
 
+诊断安装来源、运行环境和当前会话配置（不会输出 token、密码或加密凭据）：
+
+```bash
+pansh doctor
+pansh doctor --json
+```
+
 ## 交互式 shell
 
 进入后可使用：

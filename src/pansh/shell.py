@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 from typer.main import get_command
 
+from . import main as command_module
 from .api import AsyncApiManager
 from .main import (
     AppState,
@@ -65,6 +66,23 @@ VISIBLE_COMMANDS = [
 
 COMMAND_NAMES = sorted({item[0].split()[0] for item in INTERACTIVE_COMMANDS + VISIBLE_COMMANDS})
 LOCAL_SHELL_COMMANDS = ("cd", "dir", "ls", "pwd")
+ASYNC_COMMANDS = {
+    "whoami": "execute_whoami",
+    "ls": "execute_ls",
+    "tree": "execute_tree",
+    "stat": "execute_stat",
+    "find": "execute_find",
+    "search": "execute_find",
+    "mkdir": "execute_mkdir",
+    "touch": "execute_touch",
+    "rm": "execute_rm",
+    "mv": "execute_mv",
+    "cp": "execute_cp",
+    "cat": "execute_cat",
+    "upload": "execute_upload",
+    "download": "execute_download",
+}
+SYNC_TYPER_COMMANDS = {"config", "profiles"}
 
 
 def _append_sep(path: Path, text: str) -> str:
@@ -171,13 +189,19 @@ class PanShell:
         self.console = create_console(state.ui, force_terminal=True)
         self.remote_cwd = "/"
         self.local_cwd = str(Path.cwd())
-        self.home_root = state.session.home_path if state.session is not None else "/"
+        self.home_root = (
+            state.runtime_session.state.home_path
+            if state.runtime_session is not None
+            else "/"
+        )
         self.manager: AsyncApiManager | None = None
         self.completer = LocalPathCompleter(self)
 
     async def login(self) -> None:
         self.state.interactive = True
-        self.manager, self.home_root = await _login(self.console, state=self.state)
+        runtime_session = await _login(self.console, state=self.state)
+        self.manager = runtime_session.manager
+        self.home_root = runtime_session.state.home_path
         self.remote_cwd = self.home_root
 
     async def close(self) -> None:
@@ -211,10 +235,10 @@ class PanShell:
             if self.state.runtime_context.shared_environment:
                 self.console.print("当前为共享环境的临时私有会话；退出 shell 后登录状态即销毁。")
             await self.login()
-        elif self.state.session is not None:
+        elif self.state.runtime_session is not None:
             self.state.interactive = True
-            self.manager = self.state.session.manager
-            self.home_root = self.state.session.home_path
+            self.manager = self.state.runtime_session.manager
+            self.home_root = self.state.runtime_session.state.home_path
             self.remote_cwd = self.home_root
         else:
             raise RuntimeError("进入 shell 前没有可用 session")
@@ -276,6 +300,23 @@ class PanShell:
         finally:
             self._restore_env(previous_remote, previous_local)
 
+    def _parse_async_command(self, argv: list[str]) -> dict[str, object]:
+        root_command = get_command(app)
+        root_context = click.Context(
+            root_command,
+            info_name="pansh",
+            obj=self.state,
+        )
+        command = root_command.get_command(root_context, argv[0])
+        if command is None:
+            raise click.UsageError(f"未知命令：{argv[0]}")
+        with command.make_context(
+            argv[0],
+            argv[1:],
+            parent=root_context,
+        ) as command_context:
+            return dict(command_context.params)
+
     def _resolve_remote_path(self, target: str) -> str:
         previous_remote, previous_local = self._set_env()
         try:
@@ -336,11 +377,14 @@ class PanShell:
             else:
                 await self._show_command_help(argv[1])
             return False
+        if len(argv) == 2 and argv[1] in {"-h", "--help"}:
+            await self._show_command_help(argv[0])
+            return False
         if argv[0] == "logout":
             if self.state.session_controller is not None:
-                session = self.state.session
+                session = self.state.runtime_session
                 await self.state.session_controller.logout(state=self.state)
-                if session is not None and session.mode == "persistent":
+                if session is not None and session.state.mode.value == "persistent":
                     self.console.print("已注销并删除本地凭据。")
                 else:
                     self.console.print("已结束临时会话。")
@@ -379,15 +423,27 @@ class PanShell:
 
         previous_remote, previous_local = self._set_env()
         try:
-            if len(argv) == 2 and argv[1] == "-h":
-                argv = [argv[0], "--help"]
-            await asyncio.to_thread(
-                get_command(app).main,
-                args=argv,
-                prog_name="pansh",
-                standalone_mode=False,
-                obj=self.state,
-            )
+            if argv[0] in ASYNC_COMMANDS:
+                runtime = self.state.runtime_session
+                if runtime is None:
+                    raise RuntimeError("shell 没有可用的 RuntimeSession")
+                params = self._parse_async_command(argv)
+                handler = getattr(command_module, ASYNC_COMMANDS[argv[0]])
+                await handler(
+                    runtime,
+                    state=self.state,
+                    **params,
+                )
+            elif argv[0] in SYNC_TYPER_COMMANDS:
+                await asyncio.to_thread(
+                    get_command(app).main,
+                    args=argv,
+                    prog_name="pansh",
+                    standalone_mode=False,
+                    obj=self.state,
+                )
+            else:
+                raise click.UsageError(f"未知或不支持的 shell 命令：{argv[0]}")
         except click.ClickException as exc:
             self.console.print(f"命令错误：{exc.format_message()}", style="error")
         except click.Abort:

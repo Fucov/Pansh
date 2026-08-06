@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from rich.table import Table
 from rich.tree import Tree
 
 from .api import AsyncApiManager, InvalidRootException
+from ._build_commit import BUILD_COMMIT
 from .config import (
     get_auth_file,
     get_auth_dir,
@@ -29,7 +31,7 @@ from .config import (
 from .models import MatchField, ProfileConfig, SelectedRemoteItem, SessionMode, TransferStatus, TransferTask
 from .progress import format_bytes
 from .selectors import filter_remote_items, select_local_files
-from .session import Session, SessionController, SessionLoginError
+from .session import RuntimeSession, SessionController, SessionLoginError, SessionState
 from .runtime import RuntimeContext, resolve_runtime_context
 from .settings import get_settings_path, load_settings, reload_settings
 from .theme import UIOptions, create_console
@@ -57,7 +59,8 @@ class AppState:
     runtime_context: RuntimeContext
     debug: bool = False
     interactive: bool = False
-    session: Session | None = None
+    session_state: SessionState | None = None
+    runtime_session: RuntimeSession | None = None
     session_controller: SessionController | None = None
 
 
@@ -165,7 +168,8 @@ def _replace_runtime(
     )
     state.runtime_context = runtime
     state.session_controller = SessionController(runtime)
-    state.session = None
+    state.session_state = None
+    state.runtime_session = None
 
 
 def _is_interactive_tty() -> bool:
@@ -185,12 +189,28 @@ def _whoami_payload(state: AppState, *, username: str, home: str) -> dict[str, s
     }
 
 
+def _doctor_payload(state: AppState) -> dict[str, str]:
+    store = state.runtime_context.credential_store
+    return {
+        "pansh_version": __version__,
+        "build_commit": BUILD_COMMIT,
+        "package_source": str(Path(__file__).resolve().parent),
+        "python_version": sys.version.split()[0],
+        "httpx_version": importlib.metadata.version("httpx"),
+        "anyio_version": importlib.metadata.version("anyio"),
+        "session_mode": state.runtime_context.session_mode.value,
+        "profile_name": state.runtime_context.profile_name,
+        "auth_store_type": type(store).__name__,
+        "auth_store_path": store.describe(),
+    }
+
+
 async def _login(
     console: Any,
     *,
     state: AppState,
     force_reauth: bool = False,
-) -> tuple[AsyncApiManager, str]:
+) -> RuntimeSession:
     started = time.perf_counter()
     controller = state.session_controller or SessionController(state.runtime_context)
     state.session_controller = controller
@@ -201,27 +221,33 @@ async def _login(
             force_reauth=force_reauth,
         )
         logger.debug("login/session acquire took %.3fs", time.perf_counter() - started)
-        return session.manager, session.home_path
+        return session
     except SessionLoginError as exc:
         _error(str(exc))
         raise RuntimeError("unreachable")
 
 
-async def _with_manager(ctx: typer.Context) -> tuple[AsyncApiManager, str]:
+async def _with_runtime(ctx: typer.Context) -> RuntimeSession:
     state = _state(ctx)
-    if state.session is not None and state.session_controller is not None:
+    if state.runtime_session is not None and state.session_controller is not None:
         try:
-            session = await state.session_controller.refresh_session(state=state)
-            return session.manager, session.home_path
+            return await state.session_controller.refresh_session(state=state)
         except SessionLoginError:
             pass
     return await _login(state.console, state=state)
 
 
+async def _with_manager(ctx: typer.Context) -> tuple[AsyncApiManager, str]:
+    runtime_session = await _with_runtime(ctx)
+    return runtime_session.manager, runtime_session.state.home_path
+
+
 async def _release_manager(ctx: typer.Context, manager: AsyncApiManager | None = None) -> None:
     state = _state(ctx)
     if manager is not None:
-        shared_manager = state.session.manager if state.session is not None else None
+        shared_manager = (
+            state.runtime_session.manager if state.runtime_session is not None else None
+        )
         if manager is not shared_manager:
             await manager.close()
             return
@@ -405,7 +431,7 @@ def cli_callback(
         state.console.print(__version__)
         raise typer.Exit()
     if logout:
-        if state.session_controller is not None and state.session is not None:
+        if state.session_controller is not None and state.runtime_session is not None:
             _run(state.session_controller.logout(state=state))
         else:
             _clear_saved_login(state)
@@ -439,11 +465,14 @@ def login(
 
             await run_shell_with_state(state, login=False)
             return
-        manager, home = await _login(state.console, state=state, force_reauth=True)
+        runtime_session = await _login(state.console, state=state, force_reauth=True)
         try:
-            state.console.print(f"登录成功，已更新当前 profile 的凭据缓存。home: {home}")
+            state.console.print(
+                "登录成功，已更新当前 profile 的凭据缓存。"
+                f"home: {runtime_session.state.home_path}"
+            )
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime_session.manager)
 
     _run(runner())
 
@@ -452,8 +481,8 @@ def login(
 def logout_command(ctx: typer.Context) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        if state.session_controller is not None and state.session is not None:
-            persistent = state.session.mode == "persistent"
+        if state.session_controller is not None and state.runtime_session is not None:
+            persistent = state.runtime_session.state.mode is SessionMode.PERSISTENT
             await state.session_controller.logout(state=state)
             if persistent:
                 state.console.print(
@@ -477,22 +506,31 @@ def whoami_command(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            payload = _whoami_payload(state, username=manager._username, home=home)
-            if json_output:
-                _json_print(payload)
-                return
-            table = Table(title="当前用户")
-            table.add_column("字段")
-            table.add_column("值")
-            for key, value in payload.items():
-                table.add_row(key, str(value or ""))
-            state.console.print(table)
+            await execute_whoami(runtime, state=state, json_output=json_output)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 输出。"),
+) -> None:
+    state = _state(ctx)
+    payload = _doctor_payload(state)
+    if json_output:
+        _json_print(payload)
+        return
+    table = Table(title="Pansh doctor")
+    table.add_column("字段")
+    table.add_column("值")
+    for key, value in payload.items():
+        table.add_row(key, value)
+    state.console.print(table)
 
 
 @app.command()
@@ -580,6 +618,463 @@ def profiles_path(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
     state.console.print(f"auth: {get_auth_file(profile)}")
 
 
+async def execute_whoami(
+    runtime: RuntimeSession,
+    *,
+    state: AppState,
+    json_output: bool = False,
+) -> None:
+    payload = _whoami_payload(
+        state,
+        username=runtime.state.username,
+        home=runtime.state.home_path,
+    )
+    if json_output:
+        _json_print(payload)
+        return
+    table = Table(title="当前用户")
+    table.add_column("字段")
+    table.add_column("值")
+    for key, value in payload.items():
+        table.add_row(key, str(value or ""))
+    state.console.print(table)
+
+
+async def execute_ls(
+    runtime: RuntimeSession,
+    path: str = ".",
+    *,
+    state: AppState,
+    human: bool = False,
+    json_output: bool = False,
+) -> None:
+    manager = runtime.manager
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    if target == "/":
+        entrydoc = await manager.get_entrydoc()
+        if json_output:
+            _json_print(entrydoc)
+            return
+        for item in entrydoc:
+            state.console.print(item["name"], style="path")
+        return
+    info = await manager.get_resource_info_by_path(target.strip("/"))
+    if info is None:
+        _error(f"路径不存在：{target}")
+    if not info.is_dir:
+        _error(f"不是目录：{target}")
+    dirs, files = await manager.list_dir(info.docid, by="name")
+    payload = {
+        "path": target,
+        "dirs": [item.model_dump(mode="json") for item in dirs],
+        "files": [item.model_dump(mode="json") for item in files],
+    }
+    if json_output:
+        _json_print(payload)
+        return
+    if not dirs and not files:
+        state.console.print("(空目录)", style="muted")
+        return
+    table = Table(title=target)
+    table.add_column("类型")
+    table.add_column("名称")
+    table.add_column("大小", justify="right")
+    table.add_column("修改时间")
+    for item in dirs:
+        table.add_row("目录", item.name, "-", _fmt_ts(item.modified))
+    for item in files:
+        table.add_row(
+            "文件",
+            item.name,
+            format_bytes(item.size) if human else str(item.size),
+            _fmt_ts(item.modified),
+        )
+    state.console.print(table)
+
+
+async def execute_tree(
+    runtime: RuntimeSession,
+    path: str = ".",
+    *,
+    state: AppState,
+    depth: int = 3,
+) -> None:
+    manager = runtime.manager
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    info = await manager.get_resource_info_by_path(target.strip("/"))
+    if info is None or not info.is_dir:
+        _error(f"不是目录：{target}")
+    root = Tree(target)
+
+    async def walk(docid: str, node: Tree, current: int) -> None:
+        if current >= depth:
+            return
+        dirs, files = await manager.list_dir(docid, by="name")
+        for directory in dirs:
+            child = node.add(f"{directory.name}/")
+            await walk(directory.docid, child, current + 1)
+        for file in files:
+            node.add(f"{file.name} ({format_bytes(file.size)})")
+
+    await walk(info.docid, root, 0)
+    state.console.print(root)
+
+
+async def execute_stat(
+    runtime: RuntimeSession,
+    path: str,
+    *,
+    state: AppState,
+    json_output: bool = False,
+) -> None:
+    manager = runtime.manager
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    info = await manager.get_resource_info_by_path(target.strip("/"))
+    if info is None:
+        _error(f"路径不存在：{target}")
+    meta = await manager.get_file_meta(info.docid)
+    payload = {
+        "path": target,
+        "resource": info.model_dump(mode="json"),
+        "metadata": meta.model_dump(mode="json"),
+    }
+    if json_output:
+        _json_print(payload)
+        return
+    table = Table(title=target)
+    table.add_column("字段")
+    table.add_column("值")
+    table.add_row("docid", meta.docid)
+    table.add_row("name", meta.name)
+    table.add_row("size", format_bytes(meta.size))
+    table.add_row("modified", _fmt_ts(meta.modified))
+    table.add_row("client_mtime", _fmt_ts(meta.client_mtime))
+    table.add_row("editor", meta.editor or "-")
+    table.add_row("rev", meta.rev or "-")
+    table.add_row("tags", ", ".join(meta.tags) if meta.tags else "-")
+    state.console.print(table)
+
+
+async def execute_find(
+    runtime: RuntimeSession,
+    keyword: str,
+    *,
+    state: AppState,
+    path: str = ".",
+    depth: int | None = None,
+    json_output: bool = False,
+) -> None:
+    manager = runtime.manager
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    results = await manager.search(
+        target,
+        keyword,
+        max_depth=depth or state.settings.search_depth,
+    )
+    payload = [item.model_dump(mode="json") for item in results]
+    if json_output:
+        _json_print(payload)
+        return
+    if not results:
+        state.console.print("没有匹配结果。", style="warning")
+        raise typer.Exit(code=1)
+    table = Table(title=f"查找：{keyword}")
+    table.add_column("类型")
+    table.add_column("路径")
+    table.add_column("大小", justify="right")
+    table.add_column("修改时间")
+    for item in results:
+        table.add_row(
+            "目录" if item.is_dir else "文件",
+            item.path,
+            "-" if item.is_dir else format_bytes(item.size),
+            _fmt_ts(item.modified),
+        )
+    state.console.print(table)
+
+
+async def execute_mkdir(
+    runtime: RuntimeSession,
+    path: str,
+    *,
+    state: AppState,
+) -> None:
+    try:
+        await runtime.manager.create_dirs_by_path(
+            _normalize_remote_path(path, runtime.state.home_path).strip("/")
+        )
+    except InvalidRootException as exc:
+        _error(str(exc))
+
+
+async def execute_touch(
+    runtime: RuntimeSession,
+    path: str,
+    *,
+    state: AppState,
+) -> None:
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    parent = "/".join(target.strip("/").split("/")[:-1])
+    name = target.strip("/").split("/")[-1]
+    parent_id = await runtime.manager.create_dirs_by_path(parent)
+    await runtime.manager.upload_file(parent_id, name, b"", stream_len=0)
+
+
+async def execute_rm(
+    runtime: RuntimeSession,
+    path: str,
+    *,
+    state: AppState,
+    recursive: bool = False,
+) -> None:
+    manager = runtime.manager
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    info = await manager.get_resource_info_by_path(target.strip("/"))
+    if info is None:
+        _error(f"路径不存在：{target}")
+    if info.is_dir:
+        if not recursive:
+            _error("删除目录需要加 --recursive")
+        await manager.delete_dir(info.docid)
+    else:
+        await manager.delete_file(info.docid)
+
+
+async def _execute_move_or_copy(
+    runtime: RuntimeSession,
+    src: str,
+    dst: str,
+    *,
+    force: bool,
+    copy: bool,
+) -> None:
+    manager = runtime.manager
+    home = runtime.state.home_path
+    src_path = _normalize_remote_path(src, home)
+    dst_path = _normalize_remote_path(dst, home)
+    src_info = await manager.get_resource_info_by_path(src_path.strip("/"))
+    if src_info is None:
+        _error(f"源路径不存在：{src_path}")
+    dst_info = await manager.get_resource_info_by_path(dst_path.strip("/"))
+    operation = manager.copy_file if copy else manager.move_file
+    if dst_info and dst_info.is_dir:
+        await operation(src_info.docid, dst_info.docid, overwrite_on_dup=force)
+        return
+    dst_parent = "/".join(dst_path.strip("/").split("/")[:-1])
+    dst_name = dst_path.strip("/").split("/")[-1]
+    parent_info = await manager.get_resource_info_by_path(dst_parent)
+    if parent_info is None:
+        _error(f"目标父目录不存在：{dst_parent}")
+    if dst_info and not force:
+        _error(f"目标已存在：{dst_path}")
+    if dst_info and force:
+        await manager.delete_file(dst_info.docid)
+    new_id, new_name = await operation(
+        src_info.docid,
+        parent_info.docid,
+        rename_on_dup=True,
+    )
+    if new_name != dst_name:
+        await manager.rename_file(new_id, dst_name)
+
+
+async def execute_mv(
+    runtime: RuntimeSession,
+    src: str,
+    dst: str,
+    *,
+    state: AppState,
+    force: bool = False,
+) -> None:
+    await _execute_move_or_copy(runtime, src, dst, force=force, copy=False)
+
+
+async def execute_cp(
+    runtime: RuntimeSession,
+    src: str,
+    dst: str,
+    *,
+    state: AppState,
+    force: bool = False,
+) -> None:
+    await _execute_move_or_copy(runtime, src, dst, force=force, copy=True)
+
+
+async def execute_cat(
+    runtime: RuntimeSession,
+    path: str,
+    *,
+    state: AppState,
+    head: int = 0,
+    tail: int = 0,
+) -> None:
+    manager = runtime.manager
+    target = _normalize_remote_path(path, runtime.state.home_path)
+    info = await manager.get_resource_info_by_path(target.strip("/"))
+    if info is None or info.is_dir:
+        _error(f"不是文件：{target}")
+    data = bytearray()
+    async for chunk in manager.download_file_stream(info.docid):
+        data.extend(chunk)
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if head > 0:
+        lines = lines[:head]
+    elif tail > 0:
+        lines = lines[-tail:]
+    typer.echo("\n".join(lines))
+
+
+async def execute_upload(
+    runtime: RuntimeSession,
+    items: list[str] | None = None,
+    *,
+    state: AppState,
+    glob_patterns: list[str] | None = None,
+    regex: str | None = None,
+    exclude: list[str] | None = None,
+    recursive: bool = False,
+    jobs: int | None = None,
+    yes: bool = False,
+    match_field: MatchField = MatchField.BASENAME,
+) -> None:
+    manager = runtime.manager
+    glob_patterns = glob_patterns or []
+    exclude = exclude or []
+    sources, remote = _parse_upload_targets(
+        items,
+        bool(glob_patterns or regex or exclude or recursive),
+    )
+    if not (glob_patterns or regex or exclude):
+        for source in sources:
+            if Path(source).expanduser().is_dir() and not recursive:
+                _error(f"目录上传需要加 --recursive: {source}")
+    remote_dir = _normalize_remote_path(remote, runtime.state.home_path)
+    selected = select_local_files(
+        sources,
+        globs=glob_patterns,
+        regex=regex,
+        excludes=exclude,
+        recursive=recursive or bool(glob_patterns or regex or exclude),
+        match_field=match_field,
+    )
+    if not selected:
+        _error("没有匹配到本地文件。")
+    _preview_local(state.console, selected, title="上传预览")
+    _confirm(state.console, yes, "继续上传吗？")
+    tasks: list[TransferTask] = []
+    for item in selected:
+        relative_path = item.relative_path.replace("\\", "/")
+        remote_path = f"{remote_dir.rstrip('/')}/{relative_path}"
+        parent = "/".join(remote_path.strip("/").split("/")[:-1])
+        parent_id = await manager.create_dirs_by_path(parent)
+        tasks.append(
+            TransferTask(
+                remote_path=remote_path,
+                local_path=item.source_path,
+                size=item.size,
+                docid=parent_id,
+            )
+        )
+    await batch_upload(
+        manager,
+        tasks,
+        jobs=jobs or state.settings.default_jobs,
+        console=state.console,
+    )
+    failed = [task for task in tasks if task.status == TransferStatus.FAILED]
+    if failed:
+        for task in failed:
+            state.stderr_console.print(f"上传失败 {task.local_path}: {task.error}")
+        raise typer.Exit(code=1)
+
+
+async def execute_download(
+    runtime: RuntimeSession,
+    items: list[str] | None = None,
+    *,
+    state: AppState,
+    glob_patterns: list[str] | None = None,
+    regex: str | None = None,
+    exclude: list[str] | None = None,
+    recursive: bool = False,
+    search: bool = False,
+    range_scan: bool = False,
+    jobs: int | None = None,
+    yes: bool = False,
+    match_field: MatchField = MatchField.BASENAME,
+) -> None:
+    manager = runtime.manager
+    glob_patterns = glob_patterns or []
+    exclude = exclude or []
+    selector_mode = bool(glob_patterns or regex or exclude or search or range_scan)
+    roots, dest = _parse_download_targets(
+        items,
+        bool(
+            glob_patterns
+            or regex
+            or exclude
+            or recursive
+            or search
+            or range_scan
+        ),
+    )
+    dest_dir = _resolve_local_path(dest)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    normalized_roots = [
+        _normalize_remote_path(root, runtime.state.home_path) for root in roots
+    ]
+    if not selector_mode and not recursive:
+        for root in normalized_roots:
+            info = await manager.get_resource_info_by_path(root.strip("/"))
+            if info and info.is_dir:
+                _error(f"目录下载需要加 --recursive: {root}")
+    remote_items: list[SelectedRemoteItem] = []
+    for root in normalized_roots:
+        remote_items.extend(
+            await _collect_remote_items(
+                manager,
+                root,
+                recursive=recursive
+                or range_scan
+                or bool(glob_patterns or regex),
+            )
+        )
+    if glob_patterns or regex or exclude:
+        remote_items = filter_remote_items(
+            remote_items,
+            globs=glob_patterns,
+            regex=regex,
+            excludes=exclude,
+            match_field=match_field,
+        )
+    if search and not remote_items:
+        state.stderr_console.print("搜索模式回退后仍未找到任何文件。")
+    if not remote_items:
+        _error("没有匹配到远端文件。")
+    _preview_remote(state.console, remote_items, title="下载预览")
+    _confirm(state.console, yes, "继续下载吗？")
+    tasks = [
+        TransferTask(
+            remote_path=item.remote_path,
+            local_path=str(dest_dir / item.relative_path),
+            size=item.size,
+            docid=item.docid,
+        )
+        for item in remote_items
+    ]
+    await batch_download(
+        manager,
+        tasks,
+        jobs=jobs or state.settings.default_jobs,
+        console=state.console,
+    )
+    failed = [task for task in tasks if task.status == TransferStatus.FAILED]
+    if failed:
+        for task in failed:
+            state.stderr_console.print(f"下载失败 {task.remote_path}: {task.error}")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def ls(
     ctx: typer.Context,
@@ -589,51 +1084,17 @@ def ls(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            if target == "/":
-                entrydoc = await manager.get_entrydoc()
-                if json_output:
-                    _json_print(entrydoc)
-                    return
-                for item in entrydoc:
-                    state.console.print(item["name"], style="path")
-                return
-            info = await manager.get_resource_info_by_path(target.strip("/"))
-            if info is None:
-                _error(f"路径不存在：{target}")
-            if not info.is_dir:
-                _error(f"不是目录：{target}")
-            dirs, files = await manager.list_dir(info.docid, by="name")
-            payload = {
-                "path": target,
-                "dirs": [item.model_dump(mode="json") for item in dirs],
-                "files": [item.model_dump(mode="json") for item in files],
-            }
-            if json_output:
-                _json_print(payload)
-                return
-            if not dirs and not files:
-                state.console.print("(空目录)", style="muted")
-                return
-            table = Table(title=target)
-            table.add_column("类型")
-            table.add_column("名称")
-            table.add_column("大小", justify="right")
-            table.add_column("修改时间")
-            for item in dirs:
-                table.add_row("目录", item.name, "-", _fmt_ts(item.modified))
-            for item in files:
-                table.add_row(
-                    "文件",
-                    item.name,
-                    format_bytes(item.size) if human else str(item.size),
-                    _fmt_ts(item.modified),
-                )
-            state.console.print(table)
+            await execute_ls(
+                runtime,
+                path,
+                state=state,
+                human=human,
+                json_output=json_output,
+            )
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -646,28 +1107,11 @@ def tree(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            info = await manager.get_resource_info_by_path(target.strip("/"))
-            if info is None or not info.is_dir:
-                _error(f"不是目录：{target}")
-            root = Tree(target)
-
-            async def walk(docid: str, node: Tree, current: int) -> None:
-                if current >= depth:
-                    return
-                dirs, files = await manager.list_dir(docid, by="name")
-                for directory in dirs:
-                    child = node.add(f"{directory.name}/")
-                    await walk(directory.docid, child, current + 1)
-                for file in files:
-                    node.add(f"{file.name} ({format_bytes(file.size)})")
-
-            await walk(info.docid, root, 0)
-            state.console.print(root)
+            await execute_tree(runtime, path, state=state, depth=depth)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -680,35 +1124,11 @@ def stat(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            info = await manager.get_resource_info_by_path(target.strip("/"))
-            if info is None:
-                _error(f"路径不存在：{target}")
-            meta = await manager.get_file_meta(info.docid)
-            payload = {
-                "path": target,
-                "resource": info.model_dump(mode="json"),
-                "metadata": meta.model_dump(mode="json"),
-            }
-            if json_output:
-                _json_print(payload)
-                return
-            table = Table(title=target)
-            table.add_column("字段")
-            table.add_column("值")
-            table.add_row("docid", meta.docid)
-            table.add_row("name", meta.name)
-            table.add_row("size", format_bytes(meta.size))
-            table.add_row("modified", _fmt_ts(meta.modified))
-            table.add_row("client_mtime", _fmt_ts(meta.client_mtime))
-            table.add_row("editor", meta.editor or "-")
-            table.add_row("rev", meta.rev or "-")
-            table.add_row("tags", ", ".join(meta.tags) if meta.tags else "-")
-            state.console.print(table)
+            await execute_stat(runtime, path, state=state, json_output=json_output)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -723,32 +1143,18 @@ def find(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            results = await manager.search(target, keyword, max_depth=depth or state.settings.search_depth)
-            payload = [item.model_dump(mode="json") for item in results]
-            if json_output:
-                _json_print(payload)
-                return
-            if not results:
-                state.console.print("没有匹配结果。", style="warning")
-                raise typer.Exit(code=1)
-            table = Table(title=f"查找：{keyword}")
-            table.add_column("类型")
-            table.add_column("路径")
-            table.add_column("大小", justify="right")
-            table.add_column("修改时间")
-            for item in results:
-                table.add_row(
-                    "目录" if item.is_dir else "文件",
-                    item.path,
-                    "-" if item.is_dir else format_bytes(item.size),
-                    _fmt_ts(item.modified),
-                )
-            state.console.print(table)
+            await execute_find(
+                runtime,
+                keyword,
+                state=state,
+                path=path,
+                depth=depth,
+                json_output=json_output,
+            )
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -794,13 +1200,12 @@ def quota(
 @app.command()
 def mkdir(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
     async def runner() -> None:
-        manager, home = await _with_manager(ctx)
+        state = _state(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            await manager.create_dirs_by_path(_normalize_remote_path(path, home).strip("/"))
-        except InvalidRootException as exc:
-            _error(str(exc))
+            await execute_mkdir(runtime, path, state=state)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -808,15 +1213,12 @@ def mkdir(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
 @app.command()
 def touch(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
     async def runner() -> None:
-        manager, home = await _with_manager(ctx)
+        state = _state(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            parent = "/".join(target.strip("/").split("/")[:-1])
-            name = target.strip("/").split("/")[-1]
-            parent_id = await manager.create_dirs_by_path(parent)
-            await manager.upload_file(parent_id, name, b"", stream_len=0)
+            await execute_touch(runtime, path, state=state)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -828,51 +1230,24 @@ def rm(
     recursive: bool = typer.Option(False, "--recursive", "-r"),
 ) -> None:
     async def runner() -> None:
-        manager, home = await _with_manager(ctx)
+        state = _state(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            info = await manager.get_resource_info_by_path(target.strip("/"))
-            if info is None:
-                _error(f"路径不存在：{target}")
-            if info.is_dir:
-                if not recursive:
-                    _error("删除目录需要加 --recursive")
-                await manager.delete_dir(info.docid)
-            else:
-                await manager.delete_file(info.docid)
+            await execute_rm(runtime, path, state=state, recursive=recursive)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
 
 async def _move_or_copy(ctx: typer.Context, src: str, dst: str, *, force: bool, copy: bool) -> None:
-    manager, home = await _with_manager(ctx)
+    state = _state(ctx)
+    runtime = await _with_runtime(ctx)
     try:
-        src_path = _normalize_remote_path(src, home)
-        dst_path = _normalize_remote_path(dst, home)
-        src_info = await manager.get_resource_info_by_path(src_path.strip("/"))
-        if src_info is None:
-            _error(f"源路径不存在：{src_path}")
-        dst_info = await manager.get_resource_info_by_path(dst_path.strip("/"))
-        op = manager.copy_file if copy else manager.move_file
-        if dst_info and dst_info.is_dir:
-            await op(src_info.docid, dst_info.docid, overwrite_on_dup=force)
-            return
-        dst_parent = "/".join(dst_path.strip("/").split("/")[:-1])
-        dst_name = dst_path.strip("/").split("/")[-1]
-        parent_info = await manager.get_resource_info_by_path(dst_parent)
-        if parent_info is None:
-            _error(f"目标父目录不存在：{dst_parent}")
-        if dst_info and not force:
-            _error(f"目标已存在：{dst_path}")
-        if dst_info and force:
-            await manager.delete_file(dst_info.docid)
-        new_id, new_name = await op(src_info.docid, parent_info.docid, rename_on_dup=True)
-        if new_name != dst_name:
-            await manager.rename_file(new_id, dst_name)
+        operation = execute_cp if copy else execute_mv
+        await operation(runtime, src, dst, state=state, force=force)
     finally:
-        await _release_manager(ctx, manager)
+        await _release_manager(ctx, runtime.manager)
 
 
 @app.command()
@@ -903,23 +1278,12 @@ def cat(
     tail: int = typer.Option(0, "--tail"),
 ) -> None:
     async def runner() -> None:
-        manager, home = await _with_manager(ctx)
+        state = _state(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            target = _normalize_remote_path(path, home)
-            info = await manager.get_resource_info_by_path(target.strip("/"))
-            if info is None or info.is_dir:
-                _error(f"不是文件：{target}")
-            data = bytearray()
-            async for chunk in manager.download_file_stream(info.docid):
-                data.extend(chunk)
-            lines = data.decode("utf-8", errors="replace").splitlines()
-            if head > 0:
-                lines = lines[:head]
-            elif tail > 0:
-                lines = lines[-tail:]
-            typer.echo("\n".join(lines))
+            await execute_cat(runtime, path, state=state, head=head, tail=tail)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -976,48 +1340,22 @@ def upload(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            sources, remote = _parse_upload_targets(items, bool(glob_patterns or regex or exclude or recursive))
-            if not (glob_patterns or regex or exclude):
-                for source in sources:
-                    if Path(source).expanduser().is_dir() and not recursive:
-                        _error(f"目录上传需要加 --recursive: {source}")
-            remote_dir = _normalize_remote_path(remote, home)
-            selected = select_local_files(
-                sources,
-                globs=glob_patterns,
+            await execute_upload(
+                runtime,
+                items,
+                state=state,
+                glob_patterns=glob_patterns,
                 regex=regex,
-                excludes=exclude,
-                recursive=recursive or bool(glob_patterns or regex or exclude),
+                exclude=exclude,
+                recursive=recursive,
+                jobs=jobs,
+                yes=yes,
                 match_field=match_field,
             )
-            if not selected:
-                _error("没有匹配到本地文件。")
-            _preview_local(state.console, selected, title="上传预览")
-            _confirm(state.console, yes, "继续上传吗？")
-            tasks: list[TransferTask] = []
-            for item in selected:
-                relative_path = item.relative_path.replace("\\", "/")
-                remote_path = f"{remote_dir.rstrip('/')}/{relative_path}"
-                parent = "/".join(remote_path.strip("/").split("/")[:-1])
-                parent_id = await manager.create_dirs_by_path(parent)
-                tasks.append(
-                    TransferTask(
-                        remote_path=remote_path,
-                        local_path=item.source_path,
-                        size=item.size,
-                        docid=parent_id,
-                    )
-                )
-            await batch_upload(manager, tasks, jobs=jobs or state.settings.default_jobs, console=state.console)
-            failed = [task for task in tasks if task.status == TransferStatus.FAILED]
-            if failed:
-                for task in failed:
-                    state.stderr_console.print(f"上传失败 {task.local_path}: {task.error}")
-                raise typer.Exit(code=1)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 
@@ -1038,61 +1376,24 @@ def download(
 ) -> None:
     async def runner() -> None:
         state = _state(ctx)
-        manager, home = await _with_manager(ctx)
+        runtime = await _with_runtime(ctx)
         try:
-            selector_mode = bool(glob_patterns or regex or exclude or search or range_scan)
-            roots, dest = _parse_download_targets(
+            await execute_download(
+                runtime,
                 items,
-                bool(glob_patterns or regex or exclude or recursive or search or range_scan),
+                state=state,
+                glob_patterns=glob_patterns,
+                regex=regex,
+                exclude=exclude,
+                recursive=recursive,
+                search=search,
+                range_scan=range_scan,
+                jobs=jobs,
+                yes=yes,
+                match_field=match_field,
             )
-            dest_dir = _resolve_local_path(dest)
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            normalized_roots = [_normalize_remote_path(root, home) for root in roots]
-            if not selector_mode and not recursive:
-                for root in normalized_roots:
-                    info = await manager.get_resource_info_by_path(root.strip("/"))
-                    if info and info.is_dir:
-                        _error(f"目录下载需要加 --recursive: {root}")
-            remote_items: list[SelectedRemoteItem] = []
-            for root in normalized_roots:
-                remote_items.extend(
-                    await _collect_remote_items(
-                        manager,
-                        root,
-                        recursive=recursive or range_scan or bool(glob_patterns or regex),
-                    )
-                )
-            if glob_patterns or regex or exclude:
-                remote_items = filter_remote_items(
-                    remote_items,
-                    globs=glob_patterns,
-                    regex=regex,
-                    excludes=exclude,
-                    match_field=match_field,
-                )
-            if search and not remote_items:
-                state.stderr_console.print("搜索模式回退后仍未找到任何文件。")
-            if not remote_items:
-                _error("没有匹配到远端文件。")
-            _preview_remote(state.console, remote_items, title="下载预览")
-            _confirm(state.console, yes, "继续下载吗？")
-            tasks = [
-                TransferTask(
-                    remote_path=item.remote_path,
-                    local_path=str(dest_dir / item.relative_path),
-                    size=item.size,
-                    docid=item.docid,
-                )
-                for item in remote_items
-            ]
-            await batch_download(manager, tasks, jobs=jobs or state.settings.default_jobs, console=state.console)
-            failed = [task for task in tasks if task.status == TransferStatus.FAILED]
-            if failed:
-                for task in failed:
-                    state.stderr_console.print(f"下载失败 {task.remote_path}: {task.error}")
-                raise typer.Exit(code=1)
         finally:
-            await _release_manager(ctx, manager)
+            await _release_manager(ctx, runtime.manager)
 
     _run(runner())
 

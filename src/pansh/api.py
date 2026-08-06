@@ -115,6 +115,14 @@ class AsyncApiManager:
         self._expires = cached_expire or 0.0
         self._verify_tls = verify_tls
         self._client: network.httpx.AsyncClient | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+
+    def _assert_owner_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._owner_loop is None:
+            self._owner_loop = loop
+        elif self._owner_loop is not loop:
+            raise RuntimeError("AsyncApiManager cannot be reused across event loops")
 
     @property
     def client(self) -> network.httpx.AsyncClient:
@@ -123,9 +131,11 @@ class AsyncApiManager:
         return self._client
 
     async def initialize(self) -> None:
+        self._assert_owner_loop()
         await self._check_token(use_request=True)
 
     async def close(self) -> None:
+        self._assert_owner_loop()
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -141,6 +151,7 @@ class AsyncApiManager:
         return self._encrypted or ""
 
     async def _update_token(self) -> None:
+        self._assert_owner_loop()
         started = time.perf_counter()
         try:
             self._tokenid = await asyncio.to_thread(
@@ -159,6 +170,7 @@ class AsyncApiManager:
             logger.debug("token refresh took %.3fs", time.perf_counter() - started)
 
     async def _check_token(self, use_request: bool = False) -> None:
+        self._assert_owner_loop()
         if time.time() < (self._expires - 60) and self._tokenid:
             if not use_request:
                 return
@@ -178,6 +190,7 @@ class AsyncApiManager:
                 logger.debug("first request took %.3fs", time.perf_counter() - started)
 
     async def _post(self, path: str, body: dict[str, Any]) -> Any:
+        self._assert_owner_loop()
         await self._check_token()
         return await network.async_post_json(
             self._url(path),
@@ -187,6 +200,7 @@ class AsyncApiManager:
         )
 
     async def _get(self, path: str) -> Any:
+        self._assert_owner_loop()
         await self._check_token()
         return await network.async_get_json(
             self._url(path),
@@ -323,6 +337,7 @@ class AsyncApiManager:
         return data["authrequest"][1], int(data.get("length", 0))
 
     async def download_file_stream(self, file_id: str, *, resume_from: int = 0) -> AsyncIterator[bytes]:
+        self._assert_owner_loop()
         url, _ = await self.get_download_url(file_id)
         headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else {}
         async for chunk in network.async_stream_download(url, headers=headers, client=self.client):
@@ -337,6 +352,7 @@ class AsyncApiManager:
         check_existence: bool = True,
         stream_len: int | None = None,
     ) -> str:
+        self._assert_owner_loop()
         edit_mode = False
         existing_file_id: str | None = None
         upload_name = name

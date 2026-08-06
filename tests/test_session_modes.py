@@ -6,7 +6,7 @@ from pathlib import Path
 from pansh.credentials import FileCredentialStore, MemoryCredentialStore
 from pansh.models import AuthRecord, ProfileConfig, SessionMode
 from pansh.runtime import RuntimeContext
-from pansh.session import Session, SessionController
+from pansh.session import RuntimeSession, SessionController, SessionState
 
 
 class DummyConsole:
@@ -93,7 +93,7 @@ def test_ephemeral_login_uses_current_input_and_never_touches_file_store(
 
     session = asyncio.run(controller.create_session(state=state, console=DummyConsole()))
 
-    assert session.username == "current-user"
+    assert session.state.username == "current-user"
     assert captured == {
         "host": "example.test",
         "username": "current-user",
@@ -170,19 +170,22 @@ def test_profile_token_refresh_does_not_update_another_profile(tmp_path: Path) -
     manager = DummyManager("alice", token="alpha-token")
     controller = SessionController(_runtime(SessionMode.PERSISTENT, alpha_store))
     state = DummyState()
-    session = Session(
-        mode=SessionMode.PERSISTENT,
-        host="example.test",
-        username="alice",
-        token="old-alpha-token",
-        expires_at=1000,
-        home_path="/home",
+    session = RuntimeSession(
+        state=SessionState(
+            mode=SessionMode.PERSISTENT,
+            profile_name="work1",
+            host="example.test",
+            username="alice",
+            token="old-alpha-token",
+            expires_at=1000,
+            home_path="/home",
+            created_at=1,
+            pid=1,
+        ),
         manager=manager,
-        created_at=1,
-        pid=1,
     )
-    controller.session = session
-    state.session = session
+    controller.runtime_session = session
+    state.runtime_session = session
 
     asyncio.run(controller.refresh_session(state=state))
 
