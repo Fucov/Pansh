@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,13 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
-      sha: ${{ steps.release.outputs.sha }}
+      release_created: ${{ steps.release.outputs.release_created || steps.manual.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name || steps.manual.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version || steps.manual.outputs.version }}
+      sha: ${{ steps.release.outputs.sha || steps.manual.outputs.sha }}
     steps:
       - name: Create GitHub App token
         id: app-token
+        if: github.event_name == 'push'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.AUTOMERGE_APP_CLIENT_ID }}
@@ -34,11 +41,80 @@ jobs:
           permission-pull-requests: write
       - name: Run Release Please
         id: release
+        if: github.event_name == 'push'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - name: Check out an existing release tag
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Verify the GitHub Release exists
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        with:
+          script: |
+            await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: process.env.RELEASE_TAG,
+            });
+      - name: Resolve existing release metadata
+        id: manual
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          workflow_ref = os.environ["WORKFLOW_REF"]
+          if workflow_ref != "refs/heads/main":
+              raise SystemExit(
+                  f"manual release recovery must run from main, not {workflow_ref!r}"
+              )
+          release_tag = os.environ["RELEASE_TAG"]
+          tag_ref = f"refs/tags/{release_tag}"
+          tag_sha = subprocess.check_output(
+              ["git", "rev-parse", f"{tag_ref}^{{commit}}"], text=True
+          ).strip()
+          head_sha = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          if tag_sha != head_sha:
+              raise SystemExit(
+                  f"checked-out commit {head_sha!r} does not match {tag_ref} at {tag_sha!r}"
+              )
+          match = re.search(
+              r'^__version__\s*=\s*["\']([^"\']+)["\']',
+              Path("src/pansh/version.py").read_text(),
+              re.MULTILINE,
+          )
+          if match is None:
+              raise SystemExit("could not read package version")
+          outputs = Path(os.environ["GITHUB_OUTPUT"])
+          with outputs.open("a", encoding="utf-8") as handle:
+              handle.write("release_created=true\n")
+              handle.write(f"tag_name={release_tag}\n")
+              handle.write(f"version={match.group(1)}\n")
+              handle.write(
+                  "sha="
+                  + subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+                  + "\n"
+              )
+          PY
 
   build:
     name: build release distributions
@@ -87,14 +163,15 @@ jobs:
                   f"checked-out commit {head_sha!r} does not match release SHA {release_sha!r}"
               )
 
+          tag_ref = f"refs/tags/{release_tag}"
           tag_result = subprocess.run(
-              ["git", "rev-list", "-n", "1", release_tag],
+              ["git", "rev-list", "-n", "1", tag_ref],
               capture_output=True,
               text=True,
           )
           tag_sha = tag_result.stdout.strip()
           if tag_result.returncode != 0 or not tag_sha:
-              raise SystemExit(f"release tag {release_tag!r} could not be resolved")
+              raise SystemExit(f"release tag {tag_ref!r} could not be resolved")
           if tag_sha != release_sha:
               raise SystemExit(
                   f"release tag {release_tag!r} resolves to {tag_sha!r}, not {release_sha!r}"
@@ -112,10 +189,10 @@ jobs:
               raise SystemExit(
                   f"source version {source_version!r} does not match release version {release_version!r}"
               )
-          expected_tag = f"v{source_version}"
-          if release_tag != expected_tag:
+          expected_tags = {f"v{source_version}", f"pansh-v{source_version}"}
+          if release_tag not in expected_tags:
               raise SystemExit(
-                  f"release tag {release_tag!r} does not match package version {expected_tag!r}"
+                  f"release tag {release_tag!r} does not match package version {source_version!r}"
               )
           PY
       - name: Build distributions

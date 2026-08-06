@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 
 from pansh.main import AppState
-from pansh.models import AppConfig
+from pansh.credentials import MemoryCredentialStore
+from pansh.models import AuthRecord, ProfileConfig, SessionMode
+from pansh.runtime import RuntimeContext
 from pansh.session import Session, SessionController
 from pansh.theme import UIOptions
 
@@ -41,14 +43,20 @@ class DummyConsole:
 
 
 def _state(*, once: bool) -> AppState:
+    runtime = RuntimeContext(
+        profile_name="default",
+        session_mode=SessionMode.EPHEMERAL if once else SessionMode.PERSISTENT,
+        shared_environment=False,
+        profile_config=ProfileConfig(),
+        credential_store=MemoryCredentialStore(),
+    )
     return AppState(
         ui=UIOptions(),
         console=DummyConsole(),
         stderr_console=DummyConsole(),
         settings=None,
-        once=once,
-        session_config=AppConfig(),
-        session_controller=SessionController(),
+        runtime_context=runtime,
+        session_controller=SessionController(runtime),
     )
 
 
@@ -73,7 +81,7 @@ def test_once_session_reuses_same_login(monkeypatch) -> None:
     assert controller is not None
     created = 0
 
-    async def fake_create_session(*, state, console, no_store=False, force_reauth=False):
+    async def fake_create_session(*, state, console, force_reauth=False):
         nonlocal created
         created += 1
         session = _session("ephemeral")
@@ -113,7 +121,7 @@ def test_once_session_close_invalidates_session() -> None:
     assert manager.close_calls == 1
 
 
-def test_persistent_refresh_updates_saved_token(monkeypatch) -> None:
+def test_persistent_refresh_updates_saved_token() -> None:
     state = _state(once=False)
     controller = state.session_controller
     assert controller is not None
@@ -121,22 +129,14 @@ def test_persistent_refresh_updates_saved_token(monkeypatch) -> None:
     session = _session("persistent", manager)
     controller.session = session
     state.session = session
-    saved: list[tuple[str, float]] = []
-
-    def fake_save_config(cfg: AppConfig) -> None:
-        saved.append((cfg.cached_token.token, cfg.cached_token.expires))
-
-    monkeypatch.setattr("pansh.session.save_config", fake_save_config)
-
     asyncio.run(controller.refresh_session(state=state))
 
-    assert state.session_config is not None
-    assert state.session_config.cached_token.token == "fresh-token"
-    assert state.session_config.cached_token.expires == 7200.0
-    assert saved == [("fresh-token", 7200.0)]
+    record = state.runtime_context.credential_store.load()
+    assert record.cached_token.token == "fresh-token"
+    assert record.cached_token.expires == 7200.0
 
 
-def test_logout_differs_for_ephemeral_and_persistent(monkeypatch) -> None:
+def test_logout_differs_for_ephemeral_and_persistent() -> None:
     persistent_state = _state(once=False)
     persistent_controller = persistent_state.session_controller
     assert persistent_controller is not None
@@ -153,30 +153,18 @@ def test_logout_differs_for_ephemeral_and_persistent(monkeypatch) -> None:
     ephemeral_controller.session = ephemeral_session
     ephemeral_state.session = ephemeral_session
 
-    stored_cfg = AppConfig(username="saved-user")
-    stored_cfg.encrypted = "cipher"
-    stored_cfg.cached_token.token = "saved-token"
-    stored_cfg.cached_token.expires = 99.0
-    saves: list[str] = []
-
-    def fake_load_config() -> AppConfig:
-        return stored_cfg
-
-    def fake_save_config(cfg: AppConfig) -> None:
-        saves.append(cfg.cached_token.token)
-
-    monkeypatch.setattr("pansh.session.load_config", fake_load_config)
-    monkeypatch.setattr("pansh.session.save_config", fake_save_config)
+    persistent_store = persistent_state.runtime_context.credential_store
+    ephemeral_store = ephemeral_state.runtime_context.credential_store
+    persistent_store.save(AuthRecord(username="saved-user", encrypted="cipher"))
+    ephemeral_store.save(AuthRecord(username="temporary-user"))
 
     asyncio.run(ephemeral_controller.logout(state=ephemeral_state))
-    assert saves == []
+    assert ephemeral_store.load().username is None
+    assert persistent_store.load().username == "saved-user"
     assert ephemeral_controller.session is None
     assert ephemeral_state.session is None
 
     asyncio.run(persistent_controller.logout(state=persistent_state))
-    assert saves == [""]
-    assert stored_cfg.username is None
-    assert stored_cfg.encrypted is None
-    assert stored_cfg.cached_token.token == ""
+    assert persistent_store.load().username is None
     assert persistent_controller.session is None
     assert persistent_state.session is None

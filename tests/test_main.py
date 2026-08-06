@@ -7,18 +7,28 @@ from pansh.main import (
     _parse_upload_targets,
     _should_persist_login,
 )
+from pansh.credentials import MemoryCredentialStore
+from pansh.models import ProfileConfig, SessionMode
+from pansh.runtime import RuntimeContext
 from pansh.session import SessionController
 from pansh.theme import UIOptions
 
 
 def _dummy_state(*, no_store_login: bool = False) -> AppState:
+    runtime = RuntimeContext(
+        profile_name="default",
+        session_mode=SessionMode.EPHEMERAL if no_store_login else SessionMode.PERSISTENT,
+        shared_environment=False,
+        profile_config=ProfileConfig(),
+        credential_store=MemoryCredentialStore(),
+    )
     return AppState(
         ui=UIOptions(),
         console=None,
         stderr_console=None,
         settings=None,
-        once=no_store_login,
-        session_controller=SessionController(),
+        runtime_context=runtime,
+        session_controller=SessionController(runtime),
     )
 
 
@@ -48,6 +58,6 @@ def test_cli_callback_preserves_existing_state() -> None:
             self.obj = obj
 
     ctx = DummyContext(state)
-    cli_callback(ctx, no_store_login=False)
+    cli_callback(ctx, ephemeral=False)
     assert ctx.obj is state
-    assert state.once is True
+    assert state.runtime_context.session_mode is SessionMode.EPHEMERAL

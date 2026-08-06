@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "click~=8.3",
+  "filelock>=3.12,<4",
   "httpx>=0.25,<1",
   "platformdirs>=3.0,<5",
   "prompt-toolkit>=3.0.36,<4",

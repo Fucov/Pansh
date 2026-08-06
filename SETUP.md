@@ -173,7 +173,9 @@ Actions repository variable `ALLOW_EXTERNAL_CODE_AUTOMERGE` 默认保持**未设
 - `feat!:` 或正文 `BREAKING CHANGE:`：major。
 - 纯维护改动使用 `docs:`、`test:`、`chore:`、`ci:` 等合适类型。
 
-每次 `main` push 会触发 `release.yml`，不提供手动触发。Release Please 用 App token 创建/更新 Release PR；该敏感 PR 由维护者人工审阅并合并。合并后的 `main` push 创建 GitHub Release，build job 检出 Release Please 输出的精确 SHA，核对 checkout/tag/源码版本，使用固定工具链构建、Twine 检查，先以 `overwrite: true` 上传 artifact，再从 wheel 做隔离冒烟。全部成功后 publish job 下载同一 artifact，经 `pypi` Environment、OIDC 和 attestations 发布。
+每次 `main` push 会触发 `release.yml`。Release Please 用 App token 创建/更新 Release PR；该敏感 PR 由维护者人工审阅并合并。合并后的 `main` push 创建 GitHub Release，build job 检出 Release Please 输出的精确 SHA，核对 checkout/tag/源码版本，使用固定工具链构建、Twine 检查，先以 `overwrite: true` 上传 artifact，再从 wheel 做隔离冒烟。全部成功后 publish job 下载同一 artifact，经 `pypi` Environment、OIDC 和 attestations 发布。单包 release tag 统一为 `v<version>`。
+
+`release.yml` 也支持手动输入已有 GitHub Release tag，只用于恢复“Release/tag 已创建，但 build 或 PyPI publish 未执行”的版本。恢复路径同样校验 tag、SHA 与源码版本，不能用来移动 tag 或覆盖 PyPI 版本。
 
 ## 10. 端到端验证与恢复
 
@@ -190,6 +192,7 @@ Actions repository variable `ALLOW_EXTERNAL_CODE_AUTOMERGE` 默认保持**未设
 
 - **App/Release Please 或临时网络失败**：修复凭据或等待服务恢复后，在原 run 选择 **Re-run failed jobs**。更改 secret 本身不会触发新 run。
 - **build/smoke 临时失败**：artifact 上传使用 `overwrite: true`，因此可安全 **Re-run failed jobs**，同一 run 的同名 artifact 会被替换，不会因已存在而卡住。
+- **校验脚本已修复但原 run 固定在旧 workflow**：不要只点 Re-run。进入 **Actions → Release → Run workflow**，在 `main` 上填写已存在的 tag（历史兼容 tag 例如 `pansh-v3.1.3`，后续为 `vX.Y.Z`）。手动流程会重新核对不可变 tag 后构建并发布。
 - **只有 publish 因外部配置失败**：只重跑失败的 publish job；只要原 run 的 `release-distributions` artifact 仍在保留期内，它会下载并发布相同已验证产物，无需重新构建或重打 tag。
 - **Environment 等待批准**：Waiting 表示部署保护规则正在排队，不要创建新 tag；由 reviewer 批准，或在确认无人值守目标后移除 reviewer。
 - **OIDC claim 无效**：逐字核对 owner `Fucov`、repository `Pansh`、workflow `release.yml`、environment `pypi`，以及 GitHub Environment 是否仅允许当前 `main` ref。修正 PyPI Publisher/Environment 后重跑 publish。
@@ -207,6 +210,21 @@ Actions repository variable `ALLOW_EXTERNAL_CODE_AUTOMERGE` 默认保持**未设
 ## 11. 自托管 Runner 安全边界
 
 当前 workflow 全部使用 GitHub-hosted runner。未来接入 AnyShare 或内网资源时，自托管 runner **绝不能运行 fork PR 或不受信任的 PR head 代码**。应创建独立 integration workflow，只允许可信 `main` push、`schedule`，或由维护者控制输入且固定到可信 ref 的手动运行；不要把现有 PR CI 改到自托管 runner，也不要让 `pull_request_target` 检出或执行 PR 内容。
+
+## 12. 多人共享服务器认证设置
+
+personal 环境默认使用 persistent `default` profile。多人共享同一运行环境时，在 `settings.yaml` 设置：
+
+```yaml
+auth:
+  environment: shared
+  default_mode: ephemeral
+  default_profile: default
+```
+
+也可只在当前命令设置 `PANSH_SHARED=1`。ephemeral 会读取 profile 的非敏感连接配置，但不会读取、写入或删除磁盘认证状态。需要持久化区分不同用途时使用 `pansh profiles create NAME` 和 `--profile NAME`。
+
+profile 只是逻辑命名空间和并发冲突隔离，不是同一 Linux UID 内的安全边界。不得把保存的加密密码或 token 文件描述为可安全供同 UID 多人共享；真正的权限隔离需要不同系统账号或等效容器边界。
 
 ## 需要手动填写的位置
 
