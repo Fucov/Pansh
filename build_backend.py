@@ -115,14 +115,3 @@ def prepare_metadata_for_build_wheel(
     )
 
     return hatch_prepare_metadata(metadata_directory, config_settings)
-
-
-def prepare_metadata_for_build_editable(
-    metadata_directory: str,
-    config_settings: dict[str, Any] | None = None,
-) -> str:
-    from hatchling.build import (
-        prepare_metadata_for_build_editable as hatch_prepare_metadata,
-    )
-
-    return hatch_prepare_metadata(metadata_directory, config_settings)

@@ -50,6 +50,7 @@ def test_build_backend_accepts_only_commit_like_metadata(monkeypatch) -> None:
     assert build_backend.resolve_build_commit() == "unknown"
     assert callable(build_backend.build_editable)
     assert callable(build_backend.get_requires_for_build_editable)
+    assert not hasattr(build_backend, "prepare_metadata_for_build_editable")
 
 
 def test_build_backend_restores_source_metadata_after_wheel_build(
