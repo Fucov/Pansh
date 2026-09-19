@@ -39,7 +39,7 @@ dev = [
   "build>=1.0",
   "mypy>=1.8",
   "pytest>=7.4",
-  "ruff==0.16.1",
+  "ruff==0.16.2",
   "twine>=5",
 ]
 
@@ -76,7 +76,7 @@ norecursedirs = [
 ]
 
 [tool.ruff]
-required-version = "==0.16.1"
+required-version = "==0.16.2"
 target-version = "py310"
 
 [tool.ruff.lint]
