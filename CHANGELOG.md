@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/Fucov/Pansh/compare/v3.1.5...v3.2.0) (2026-10-16)
+
+
+### Features
+
+* support Tongji Yunpan web login ([#29](https://github.com/Fucov/Pansh/issues/29)) ([3c3d12a](https://github.com/Fucov/Pansh/commit/3c3d12ad48de1ba3e4143a12b37dae5c2597b154))
+
 ## [3.1.5](https://github.com/Fucov/Pansh/compare/v3.1.4...v3.1.5) (2026-08-06)
 
 
