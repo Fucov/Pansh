@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 import urllib.parse
+from typing import Any
 
 import rsa as _rsa
 
@@ -24,6 +26,7 @@ def rsa_encrypt(message: str, public_key: str) -> str:
 
 _CLIENT_ID = "0f4bc444-d39a-4945-84a3-023d1f439148"
 _BASIC_AUTH = "Basic MGY0YmM0NDQtZDM5YS00OTQ1LTg0YTMtMDIzZDFmNDM5MTQ4OnVOaVU0V0ZUd1FEfjE4T2JHMkU1M2dqN3ot"
+_TONGJI_HOST = "yunpan.tongji.edu.cn"
 
 
 def _extract_login_challenge(html: str) -> tuple[str, str]:
@@ -39,6 +42,87 @@ def _extract_code(url: str) -> str | None:
     """从 anyshare:// 回调 URL 中提取 authorization code。"""
     m = re.search(r"code=([^&]+)", url)
     return m.group(1) if m else None
+
+
+def _uses_tongji_login(base_url: str) -> bool:
+    """判断当前端点是否使用同济云盘的 Web 登录流程。"""
+    hostname = (urllib.parse.urlparse(base_url).hostname or "").lower().rstrip(".")
+    return hostname == _TONGJI_HOST
+
+
+def _extract_tongji_login_props(html: str) -> tuple[str, str, dict[str, Any]]:
+    """从同济云盘登录页的 __NEXT_DATA__ 中提取 challenge、csrftoken 和设备信息。"""
+    match = re.search(
+        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html,
+        re.S,
+    )
+    if not match:
+        raise RuntimeError("无法从同济云盘登录页提取 __NEXT_DATA__")
+    next_data = json.loads(match.group(1))
+    props = next_data["props"]["pageProps"]
+    challenge = props["challenge"]
+    csrf_token = props["csrftoken"]
+    device = props.get("device") or {
+        "name": "",
+        "description": "",
+        "client_type": "web",
+        "udids": [],
+    }
+    return challenge, csrf_token, device
+
+
+def _get_tongji_access_token(
+    base_url: str,
+    username: str,
+    encrypted_password: str,
+    *,
+    verify_tls: bool,
+) -> str:
+    """走同济云盘 Web 登录流程，返回 access_token。"""
+    base_url = base_url.rstrip("/")
+    client = network.create_client(follow_redirects=True, verify_tls=verify_tls)
+    try:
+        login_query = urllib.parse.urlencode(
+            {
+                "lang": "zh-cn",
+                "redirect": "/anyshare/zh-cn/homepage",
+            }
+        )
+        login_resp = client.get(f"{base_url}/anyshare/oauth2/login?{login_query}")
+        challenge, csrf_token, device = _extract_tongji_login_props(login_resp.text)
+
+        signin_body = {
+            "_csrf": csrf_token,
+            "challenge": challenge,
+            "account": username,
+            "password": encrypted_password,
+            "vcode": {"id": "", "content": ""},
+            "dualfactorauthinfo": {
+                "validcode": {"vcode": ""},
+                "OTP": {"OTP": ""},
+            },
+            "remember": False,
+            "device": device,
+        }
+        signin_resp = network.post_json(
+            f"{base_url}/oauth2/signin",
+            signin_body,
+            client=client,
+        )
+        if not isinstance(signin_resp, dict) or "redirect" not in signin_resp:
+            raise network.ApiException(
+                signin_resp if isinstance(signin_resp, dict) else None,
+                f"同济云盘登录失败: {signin_resp}",
+            )
+
+        client.get(str(signin_resp["redirect"]))
+        token = client.cookies.get("client.oauth2_token")
+        if not token:
+            raise RuntimeError("同济云盘登录成功，但未获取到 client.oauth2_token")
+        return token
+    finally:
+        client.close()
 
 
 def _follow_redirects_until_anyshare(
@@ -76,6 +160,14 @@ def get_access_token(
     encrypted_password : str
         RSA + base64 加密后的密码
     """
+    if _uses_tongji_login(base_url):
+        return _get_tongji_access_token(
+            base_url,
+            username,
+            encrypted_password,
+            verify_tls=verify_tls,
+        )
+
     base_url = base_url.rstrip("/")
     state = urllib.parse.quote(base64.b64encode(b'{"windowId":3}'))
 

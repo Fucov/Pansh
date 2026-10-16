@@ -260,10 +260,35 @@ pansh download /home/file.pdf
 
 ## 其他学校
 
-`pansh` 目前默认按北航的 AnyShare 配置工作。如果你所在学校也在使用爱数 AnyShare / 爱数云盘，通常也可以复用这套 CLI，但可能需要自行适配 `host`、登录入口或认证细节。
+`pansh` 默认按北航的 AnyShare 配置工作。同济云盘的 Web 登录端点已内置适配，其他学校通常也可以复用这套 CLI，但可能需要自行适配 `host`、登录入口或认证细节。
+
+### 同济云盘
+
+同济云盘使用 Web 登录端点，`pansh` 会根据 `host` 自动选择登录流程。
+
+```bash
+pansh profiles create tongji
+pansh profiles path tongji
+```
+
+编辑 `profile.yaml`：
+
+```yaml
+host: yunpan.tongji.edu.cn
+verify_tls: true
+store_password: true
+```
+
+登录并使用：
+
+```bash
+pansh --profile tongji login
+pansh --profile tongji ls .
+```
 
 我目前确认到的公开案例包括：
 
+- 同济大学：https://yunpan.tongji.edu.cn/
 - 中山大学：https://pan.sysu.edu.cn/
 - 天津大学：https://pan.tju.edu.cn/
 - 北京大学：https://disk.pku.edu.cn/
